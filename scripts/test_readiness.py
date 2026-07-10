@@ -123,6 +123,8 @@ class ReadinessScoringTest(unittest.TestCase):
         self.assertIn("description:", skill.split("---", 2)[1])
         self.assertTrue(readiness.DEFAULT_RUBRIC.is_file())
         self.assertTrue(readiness.PREFERENCES_TEMPLATE.is_file())
+        self.assertEqual(readiness.package_version(), "0.2.0")
+        self.assertEqual(len(readiness.package_fingerprint()), 64)
         self.assertEqual(
             readiness.PREFERENCES_TEMPLATE.name,
             "DEFAULT_AGENT_READINESS_PREFERENCES.md",
@@ -319,6 +321,10 @@ class ReadinessScoringTest(unittest.TestCase):
             self.assertEqual(assessment["preferences"]["source"], "AGENT_READINESS_PREFERENCES.md")
             self.assertEqual(set(assessment["repository"]["applications"]), {"backend", "frontend"})
             self.assertFalse(assessment["repository"]["dirty"])
+            self.assertEqual(assessment["preferences"]["checksum"], readiness.sha256_file(repository / "AGENT_READINESS_PREFERENCES.md"))
+            self.assertEqual(assessment["provenance"]["skill_version"], "0.2.0")
+            self.assertEqual(assessment["provenance"]["applications"], ["backend", "frontend"])
+            self.assertEqual(assessment["provenance"]["evidence_checks"], [])
             self.assertEqual(len(assessment["criteria"]), 82)
             self.assertEqual(assessment["criteria"]["readme"]["status"], "unscored")
 
@@ -364,6 +370,7 @@ class ReadinessScoringTest(unittest.TestCase):
             result = run_cli("score", "--assessment", str(path), "--output-dir", str(output))
             self.assertEqual(result.returncode, 0, result.stderr)
             markdown = (output / "agent-readiness-report.md").read_text(encoding="utf-8")
+            html = (output / "agent-readiness-report.html").read_text(encoding="utf-8")
             payload = json.loads((output / "agent-readiness-report.json").read_text(encoding="utf-8"))
             self.assertIn("**README** (`readme`, Level 1)", markdown)
             self.assertIn("Owned: Level 5 (98.78%)", result.stdout)
@@ -371,6 +378,117 @@ class ReadinessScoringTest(unittest.TestCase):
             self.assertEqual(payload["summary"]["compatibility_percentage"], 98.1707)
             self.assertEqual(payload["criteria"]["readme"]["failing_units"], ["repository"])
             self.assertEqual(payload["criteria"]["database_schema"]["skipped_units"], ["frontend"])
+            self.assertIn("<!doctype html>", html)
+            self.assertIn("Highest-value failures", html)
+            self.assertIn("README", html)
+            self.assertEqual(len(payload["summary"]["categories"]), 9)
+            self.assertIn("no structured provenance", payload["audit_warnings"][0])
+
+    def test_provenance_rejects_oversized_or_multiline_evidence_checks(self) -> None:
+        assessment = self.assessment()
+        assessment["provenance"] = {
+            "audit_timestamp": "2026-07-10T12:00:00Z",
+            "rubric_checksum": "abc",
+            "preferences_checksum": "def",
+            "skill_version": "0.2.0",
+            "skill_fingerprint": "123",
+            "repository_commit": "abc123",
+            "repository_dirty": False,
+            "applications": ["backend", "frontend"],
+            "evidence_checks": [{
+                "kind": "command",
+                "label": "tests",
+                "checked_at": "2026-07-10T12:00:00Z",
+                "exit_status": 0,
+                "command": "yarn test\necho secret",
+                "summary": "passed",
+            }],
+        }
+        with self.assertRaisesRegex(readiness.AssessmentError, "one non-empty line"):
+            readiness.validate_assessment(assessment, self.rubric)
+
+    def test_external_provenance_surfaces_stale_evidence(self) -> None:
+        warnings = readiness.provenance_warnings({
+            "evidence_checks": [{
+                "kind": "external",
+                "label": "branch protection",
+                "fresh_until": "2020-01-01T00:00:00Z",
+            }]
+        })
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("branch protection", warnings[0])
+        self.assertIn("stale", warnings[0])
+
+    def test_comparison_promotes_regressions_and_tracks_evidence_changes(self) -> None:
+        before_assessment = self.assessment()
+        after_assessment = copy.deepcopy(before_assessment)
+        before_assessment["criteria"]["lint_config"]["applications"]["frontend"] = judgment("fail")
+        after_assessment["criteria"]["readme"] = judgment("fail")
+        after_assessment["criteria"]["lint_config"]["applications"]["frontend"]["evidence"] = ["new lint proof"]
+        before = readiness.report_payload(before_assessment, self.rubric, readiness.score_assessment(before_assessment, self.rubric))
+        after = readiness.report_payload(after_assessment, self.rubric, readiness.score_assessment(after_assessment, self.rubric))
+        comparison = readiness.comparison_payload(before, after)
+        self.assertIn("readme", comparison["regressions"])
+        self.assertIn("lint_config", comparison["improvements"])
+        self.assertEqual(comparison["criteria"]["readme"]["regressions"], ["repository"])
+        self.assertEqual(comparison["criteria"]["lint_config"]["newly_passing_units"], ["frontend"])
+        self.assertEqual(comparison["criteria"]["lint_config"]["evidence_changes"], ["frontend"])
+        self.assertIn("## Regressions", readiness.render_comparison_markdown(comparison))
+        self.assertIn("class=\"regression\"", readiness.render_comparison_html(comparison))
+
+    def test_cli_compare_accepts_assessments_and_writes_three_formats(self) -> None:
+        before = self.assessment()
+        after = copy.deepcopy(before)
+        after["criteria"]["readme"] = judgment("fail")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before_path = root / "before.json"
+            after_path = root / "after.json"
+            output = root / "comparison"
+            self.write_json(before_path, before)
+            self.write_json(after_path, after)
+            result = run_cli("compare", "--before", str(before_path), "--after", str(after_path), "--output-dir", str(output))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Regressions: 1", result.stdout)
+            self.assertTrue((output / "agent-readiness-comparison.md").is_file())
+            self.assertTrue((output / "agent-readiness-comparison.json").is_file())
+            self.assertTrue((output / "agent-readiness-comparison.html").is_file())
+
+    def test_doctor_reports_package_and_root_preferences(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repo"
+            initialize_git_repository(repository, with_preferences=True)
+            result = run_cli("doctor", "--repo", str(repository), "--json")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertTrue(report["ok"])
+            checks = {check["name"]: check for check in report["checks"]}
+            self.assertEqual(checks["preferences"]["status"], "pass")
+            self.assertIn("fingerprint", checks["package"]["detail"])
+
+    def test_vendor_is_dry_run_by_default_and_apply_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / ".agents" / "skills" / "agent-readiness-scoring"
+            dry_run = run_cli("vendor", "--target", str(target), "--json")
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            self.assertFalse(target.exists())
+            self.assertEqual(json.loads(dry_run.stdout)["mode"], "dry-run")
+
+            applied = run_cli("vendor", "--target", str(target), "--apply", "--json")
+            self.assertEqual(applied.returncode, 0, applied.stderr)
+            self.assertTrue((target / readiness.VENDOR_METADATA).is_file())
+            self.assertTrue((target / "scripts" / "readiness.py").is_file())
+            (target / "LOCAL_NOTES.md").write_text("preserve me\n", encoding="utf-8")
+
+            current = run_cli("vendor", "--target", str(target), "--apply", "--json")
+            self.assertEqual(current.returncode, 0, current.stderr)
+            plan = json.loads(current.stdout)
+            self.assertTrue(all(item["status"] == "current" for item in plan["files"]))
+            self.assertEqual((target / "LOCAL_NOTES.md").read_text(encoding="utf-8"), "preserve me\n")
+
+            vendored_doctor = run_command(sys.executable, str(target / "scripts" / "readiness.py"), "doctor", "--json")
+            self.assertEqual(vendored_doctor.returncode, 0, vendored_doctor.stderr)
+            self.assertTrue(json.loads(vendored_doctor.stdout)["ok"])
 
 
 if __name__ == "__main__":

@@ -18,7 +18,8 @@ rubric. Prefer real engineering capability over score theater and make every jud
   validate it, rescore it, and commit only that fix when authorized.
 - **Improve to target:** repeat one criterion and one commit at a time until the requested owned
   percentage or level is reached, or a genuine blocker requires user authority.
-- **Compare:** render both the fair owned score and the Factory-compatible score from one audit.
+- **Compare:** compare two assessments or reports and make regressions visible even when the total
+  score rises.
 
 For an audit, read `references/rubric.json` completely. For remediation or a target loop, also read
 `references/remediation-loop.md`. Apply preferences in this order: explicit instructions in the
@@ -41,6 +42,8 @@ accept costs, install external apps, add secrets, or mutate production.
    external-state criteria may cite CLI/API output. Do not award credit for prose claiming an
    implementation exists when the implementation is absent.
 7. Create an assessment matching `references/assessment-format.md`.
+   Record command and external-state checks in `provenance.evidence_checks`; store concise summaries,
+   timestamps, and exit status rather than secrets or raw output.
 8. Validate and render it with:
 
    `python3 <skill-dir>/scripts/readiness.py score --assessment <assessment.json> --output-dir <dir>`
@@ -50,7 +53,7 @@ accept costs, install external apps, add secrets, or mutate production.
    - **Compatibility score:** counts mixed inapplicable applications against app-scoped criteria,
      reproducing the vendor behavior for comparison. Fully inapplicable criteria remain skipped.
 10. Lead with level, percentage, failed criteria, and highest-value next actions. Link the generated
-    Markdown and JSON reports.
+    HTML, Markdown, and JSON reports.
 
 If subagents are available and the task benefits from independence, give a fresh auditor only the
 repository path and: `Use $agent-readiness-scoring at <skill-dir> to perform a read-only audit.` Do
@@ -75,7 +78,13 @@ not leak expected scores. The primary agent must still validate the resulting as
 
 - `readiness.py init`: create an unscored 82-criterion assessment skeleton.
 - `readiness.py validate`: validate IDs, scopes, statuses, evidence, and application coverage.
-- `readiness.py score`: validate and generate `agent-readiness-report.md` plus JSON.
+- `readiness.py score`: validate and generate HTML, Markdown, and JSON readiness reports.
+- `readiness.py compare`: compare two assessments or report JSON files and generate Markdown, JSON,
+  and HTML deltas with regressions first.
+- `readiness.py doctor`: verify package integrity, tools, Git state, preference discovery, and
+  vendored-package fingerprints.
+- `readiness.py vendor`: preview a deterministic package sync; require `--apply` to write only the
+  explicit distributable files and retain unrelated files.
 - `readiness.py list`: print the rubric in a compact table.
 - `readiness.py preferences`: copy the preferences template without overwriting.
 
