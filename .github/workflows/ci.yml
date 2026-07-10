@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-readiness-scoring-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Compile Python entry points
+        run: python3 -m py_compile scripts/readiness.py scripts/test_readiness.py
+
+      - name: Run scoring and CLI tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 scripts/test_readiness.py --verbose
+
+      - name: Smoke test executable CLI
+        run: |
+          test "$(scripts/readiness.py list | wc -l | tr -d ' ')" = "82"
+          scripts/readiness.py --help >/dev/null

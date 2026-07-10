@@ -82,10 +82,37 @@ def load_rubric(path: Path) -> dict[str, Any]:
     if not isinstance(criteria, list):
         raise AssessmentError("Rubric must contain a criteria array.")
     ids = [criterion.get("id") for criterion in criteria if isinstance(criterion, dict)]
-    if len(criteria) != 82 or len(set(ids)) != 82:
+    string_ids = [criterion_id for criterion_id in ids if isinstance(criterion_id, str) and criterion_id]
+    if len(criteria) != 82 or len(ids) != 82 or len(string_ids) != 82 or len(set(string_ids)) != 82:
         raise AssessmentError(
-            f"Rubric must contain exactly 82 unique criteria; found {len(criteria)} entries and {len(set(ids))} IDs."
+            f"Rubric must contain exactly 82 unique criteria; found {len(criteria)} entries and {len(set(string_ids))} IDs."
         )
+    errors: list[str] = []
+    for index, criterion in enumerate(criteria):
+        if not isinstance(criterion, dict):
+            errors.append(f"criteria[{index}] must be an object")
+            continue
+        criterion_id = criterion.get("id")
+        label = criterion_id if isinstance(criterion_id, str) and criterion_id else f"criteria[{index}]"
+        if not isinstance(criterion_id, str) or not criterion_id.strip():
+            errors.append(f"{label}: id must be a non-empty string")
+        if criterion.get("scope") not in {"repository", "application"}:
+            errors.append(f"{label}: scope must be repository or application")
+        if criterion.get("category") not in CATEGORY_TITLES:
+            errors.append(f"{label}: category is not recognized")
+        level = criterion.get("level")
+        if isinstance(level, bool) or not isinstance(level, int) or not 1 <= level <= 5:
+            errors.append(f"{label}: level must be an integer from 1 through 5")
+        if not isinstance(criterion.get("skippable"), bool):
+            errors.append(f"{label}: skippable must be a boolean")
+        for field in ("title", "guidance"):
+            value = criterion.get(field)
+            if not isinstance(value, str) or not value.strip():
+                errors.append(f"{label}: {field} must be a non-empty string")
+    if not isinstance(rubric.get("version"), str) or not rubric["version"].strip():
+        errors.append("version must be a non-empty string")
+    if errors:
+        raise AssessmentError("Rubric validation failed:\n- " + "\n- ".join(errors))
     return rubric
 
 
@@ -183,6 +210,12 @@ def validate_judgment(
 
 def validate_assessment(assessment: dict[str, Any], rubric: dict[str, Any]) -> None:
     errors: list[str] = []
+    if assessment.get("schema_version") != "1.0":
+        errors.append("schema_version must be 1.0.")
+    if assessment.get("rubric_version") != rubric["version"]:
+        errors.append(
+            f"rubric_version must match the loaded rubric ({rubric['version']})."
+        )
     repository = assessment.get("repository")
     if not isinstance(repository, dict):
         raise AssessmentError("Assessment repository must be an object.")
