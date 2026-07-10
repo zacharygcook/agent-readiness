@@ -11,8 +11,9 @@ rubric. Prefer real engineering capability over score theater and make every jud
 ## Choose the operation
 
 - **Audit:** inspect and score without changing the repository.
-- **Initialize preferences:** copy `assets/AGENT_READINESS_PREFERENCES.md` to the repo root only when
-  the user requests it or approves repository changes. Never overwrite an existing file.
+- **Initialize preferences:** copy `assets/DEFAULT_AGENT_READINESS_PREFERENCES.md` to
+  `AGENT_READINESS_PREFERENCES.md` in the repository root only when the user requests it or approves
+  repository changes. Never overwrite an existing file.
 - **Remediate one:** score, select one failing criterion, implement a durable repo-specific fix,
   validate it, rescore it, and commit only that fix when authorized.
 - **Improve to target:** repeat one criterion and one commit at a time until the requested owned
@@ -20,8 +21,11 @@ rubric. Prefer real engineering capability over score theater and make every jud
 - **Compare:** render both the fair owned score and the Factory-compatible score from one audit.
 
 For an audit, read `references/rubric.json` completely. For remediation or a target loop, also read
-`references/remediation-loop.md`. Read `AGENT_READINESS_PREFERENCES.md` when present; otherwise use
-`references/default-preferences.md` and state that defaults were used.
+`references/remediation-loop.md`. Apply preferences in this order: explicit instructions in the
+current request, root `AGENT_READINESS_PREFERENCES.md`, then
+`assets/DEFAULT_AGENT_READINESS_PREFERENCES.md`. State which file was used. Preferences guide how to
+implement a capability; they are not standing permission to create or connect third-party accounts,
+accept costs, install external apps, add secrets, or mutate production.
 
 ## Audit workflow
 

@@ -17,7 +17,7 @@ from typing import Any
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUBRIC = SKILL_ROOT / "references" / "rubric.json"
-PREFERENCES_TEMPLATE = SKILL_ROOT / "assets" / "AGENT_READINESS_PREFERENCES.md"
+PREFERENCES_TEMPLATE = SKILL_ROOT / "assets" / "DEFAULT_AGENT_READINESS_PREFERENCES.md"
 ALLOWED_STATUSES = {"pass", "fail", "not_applicable"}
 ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 CATEGORY_TITLES = {
