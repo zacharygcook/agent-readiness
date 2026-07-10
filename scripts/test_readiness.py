@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("readiness.py")
@@ -79,6 +80,17 @@ def initialize_git_repository(path: Path, *, with_preferences: bool = False) -> 
         raise RuntimeError(result.stderr)
 
 
+def create_fake_browser(path: Path) -> None:
+    path.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "target = next(value.split('=', 1)[1] for value in sys.argv if value.startswith('--print-to-pdf='))\n"
+        "pathlib.Path(target).write_bytes(b'%PDF-1.4\\n' + b'x' * 2048)\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 class ReadinessScoringTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -123,7 +135,7 @@ class ReadinessScoringTest(unittest.TestCase):
         self.assertIn("description:", skill.split("---", 2)[1])
         self.assertTrue(readiness.DEFAULT_RUBRIC.is_file())
         self.assertTrue(readiness.PREFERENCES_TEMPLATE.is_file())
-        self.assertEqual(readiness.package_version(), "0.2.0")
+        self.assertEqual(readiness.package_version(), "0.3.0")
         self.assertEqual(len(readiness.package_fingerprint()), 64)
         self.assertEqual(
             readiness.PREFERENCES_TEMPLATE.name,
@@ -322,9 +334,10 @@ class ReadinessScoringTest(unittest.TestCase):
             self.assertEqual(set(assessment["repository"]["applications"]), {"backend", "frontend"})
             self.assertFalse(assessment["repository"]["dirty"])
             self.assertEqual(assessment["preferences"]["checksum"], readiness.sha256_file(repository / "AGENT_READINESS_PREFERENCES.md"))
-            self.assertEqual(assessment["provenance"]["skill_version"], "0.2.0")
+            self.assertEqual(assessment["provenance"]["skill_version"], "0.3.0")
             self.assertEqual(assessment["provenance"]["applications"], ["backend", "frontend"])
             self.assertEqual(assessment["provenance"]["evidence_checks"], [])
+            self.assertEqual(assessment["recommendations"], [])
             self.assertEqual(len(assessment["criteria"]), 82)
             self.assertEqual(assessment["criteria"]["readme"]["status"], "unscored")
 
@@ -366,8 +379,13 @@ class ReadinessScoringTest(unittest.TestCase):
             root = Path(directory)
             path = root / "assessment.json"
             output = root / "report"
+            browser = root / "fake-chromium"
+            create_fake_browser(browser)
             self.write_json(path, assessment)
-            result = run_cli("score", "--assessment", str(path), "--output-dir", str(output))
+            result = run_cli(
+                "score", "--assessment", str(path), "--output-dir", str(output),
+                "--pdf", "--browser", str(browser),
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             markdown = (output / "agent-readiness-report.md").read_text(encoding="utf-8")
             html = (output / "agent-readiness-report.html").read_text(encoding="utf-8")
@@ -379,9 +397,20 @@ class ReadinessScoringTest(unittest.TestCase):
             self.assertEqual(payload["criteria"]["readme"]["failing_units"], ["repository"])
             self.assertEqual(payload["criteria"]["database_schema"]["skipped_units"], ["frontend"])
             self.assertIn("<!doctype html>", html)
-            self.assertIn("Highest-value failures", html)
+            self.assertIn("01 / Category health", html)
+            self.assertIn("03 / Priority queue", html)
+            self.assertIn("04 / Application surface", html)
+            self.assertIn("class=\"category-track\"", html)
             self.assertIn("README", html)
+            self.assertTrue((output / "agent-readiness-report.pdf").is_file())
+            self.assertIn("PDF:", result.stdout)
+            self.assertEqual(payload["report_version"], "2.0")
             self.assertEqual(len(payload["summary"]["categories"]), 9)
+            self.assertEqual(payload["summary"]["status_counts"]["fail"], 1)
+            self.assertEqual(payload["summary"]["category_breakdown"]["documentation"]["fail"], 1)
+            self.assertEqual(payload["applications"]["backend"]["percentage"], 100)
+            self.assertEqual(payload["applications"]["frontend"]["not_applicable"], 1)
+            self.assertEqual(payload["next_actions"][0]["source"], "fallback")
             self.assertIn("no structured provenance", payload["audit_warnings"][0])
 
     def test_provenance_rejects_oversized_or_multiline_evidence_checks(self) -> None:
@@ -445,14 +474,82 @@ class ReadinessScoringTest(unittest.TestCase):
             before_path = root / "before.json"
             after_path = root / "after.json"
             output = root / "comparison"
+            browser = root / "fake-chromium"
+            create_fake_browser(browser)
             self.write_json(before_path, before)
             self.write_json(after_path, after)
-            result = run_cli("compare", "--before", str(before_path), "--after", str(after_path), "--output-dir", str(output))
+            result = run_cli(
+                "compare", "--before", str(before_path), "--after", str(after_path),
+                "--output-dir", str(output), "--pdf", "--browser", str(browser),
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Regressions: 1", result.stdout)
             self.assertTrue((output / "agent-readiness-comparison.md").is_file())
             self.assertTrue((output / "agent-readiness-comparison.json").is_file())
             self.assertTrue((output / "agent-readiness-comparison.html").is_file())
+            self.assertTrue((output / "agent-readiness-comparison.pdf").is_file())
+
+    def test_ranked_recommendations_drive_report_actions_and_authority_badges(self) -> None:
+        assessment = self.assessment()
+        assessment["criteria"]["readme"] = judgment("fail")
+        assessment["recommendations"] = [{
+            "criterion_id": "readme",
+            "priority": 1,
+            "rationale": "Accurate setup guidance unlocks safe first-run agent work.",
+            "effort": "small",
+            "authority": "autonomous",
+            "flags": [],
+        }]
+        scores = readiness.score_assessment(assessment, self.rubric)
+        payload = readiness.report_payload(assessment, self.rubric, scores)
+        report = readiness.render_html(payload)
+        self.assertTrue(payload["recommendations_ranked"])
+        self.assertEqual(payload["next_actions"][0]["criterion_id"], "readme")
+        self.assertEqual(payload["next_actions"][0]["authority"], "autonomous")
+        self.assertIn("authority-autonomous", report)
+        self.assertIn("Accurate setup guidance", report)
+
+    def test_recommendations_require_known_unique_criteria_and_authority(self) -> None:
+        assessment = self.assessment()
+        assessment["recommendations"] = [{
+            "criterion_id": "not_real",
+            "priority": 1,
+            "rationale": "Invalid fixture.",
+            "effort": "tiny",
+            "authority": "silent_mutation",
+            "flags": ["cheap_score"],
+        }]
+        with self.assertRaisesRegex(readiness.AssessmentError, r"recommendations\[0\]") as context:
+            readiness.validate_assessment(assessment, self.rubric)
+        self.assertIn("criterion_id", str(context.exception))
+        self.assertIn("effort", str(context.exception))
+        self.assertIn("authority", str(context.exception))
+        self.assertIn("flags", str(context.exception))
+
+    def test_cli_score_embeds_progress_from_previous_round(self) -> None:
+        before = self.assessment()
+        before["criteria"]["readme"] = judgment("fail")
+        after = self.assessment()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            before_path = root / "before.json"
+            after_path = root / "after.json"
+            output = root / "report"
+            self.write_json(before_path, before)
+            self.write_json(after_path, after)
+            result = run_cli(
+                "score", "--assessment", str(after_path), "--previous", str(before_path),
+                "--output-dir", str(output),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads((output / "agent-readiness-report.json").read_text(encoding="utf-8"))
+            html = (output / "agent-readiness-report.html").read_text(encoding="utf-8")
+            markdown = (output / "agent-readiness-report.md").read_text(encoding="utf-8")
+            self.assertEqual(payload["progress"]["summary"]["improvement_count"], 1)
+            self.assertIn("02 / Progress", html)
+            self.assertIn("README", html)
+            self.assertIn("Progress Since Previous Round", markdown)
+            self.assertIn("+1.22 points", markdown)
 
     def test_doctor_reports_package_and_root_preferences(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -465,6 +562,36 @@ class ReadinessScoringTest(unittest.TestCase):
             checks = {check["name"]: check for check in report["checks"]}
             self.assertEqual(checks["preferences"]["status"], "pass")
             self.assertIn("fingerprint", checks["package"]["detail"])
+            self.assertIn(checks["pdf browser"]["status"], {"pass", "info"})
+
+    def test_pdf_refuses_missing_explicit_browser_without_downloading(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            html_path = root / "report.html"
+            html_path.write_text("<!doctype html><title>Report</title>", encoding="utf-8")
+            with self.assertRaisesRegex(readiness.AssessmentError, "executable not found"):
+                readiness.render_pdf(html_path, root / "report.pdf", root / "missing-browser")
+
+    def test_pdf_accepts_completed_artifact_when_browser_lingers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            browser = root / "browser"
+            browser.write_text("fixture\n", encoding="utf-8")
+            browser.chmod(0o755)
+            html_path = root / "report.html"
+            pdf_path = root / "report.pdf"
+            html_path.write_text("<!doctype html><title>Report</title>", encoding="utf-8")
+
+            def linger(arguments: list[str], **_kwargs: object) -> None:
+                target = next(value.split("=", 1)[1] for value in arguments if value.startswith("--print-to-pdf="))
+                Path(target).write_bytes(b"%PDF-1.4\n" + b"x" * 2048)
+                raise subprocess.TimeoutExpired(arguments, 60)
+
+            with mock.patch.object(readiness.subprocess, "run", side_effect=linger):
+                result = readiness.render_pdf(html_path, pdf_path, browser)
+
+            self.assertEqual(result, pdf_path.resolve())
+            self.assertGreater(result.stat().st_size, 1000)
 
     def test_vendor_is_dry_run_by_default_and_apply_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

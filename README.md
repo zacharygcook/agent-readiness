@@ -17,7 +17,10 @@ preferences, reports, and remediation loop fully inspectable and customizable.
 - Produces a Factory-compatible score beside it for comparison.
 - Discovers and honors repository-specific `AGENT_READINESS_PREFERENCES.md` guidance.
 - Supports one-criterion-at-a-time autonomous remediation with explicit safety gates.
-- Generates self-contained HTML, Markdown, and JSON reports through a dependency-free Python CLI.
+- Generates first-class, self-contained HTML, Markdown, and JSON reports through a dependency-free
+  Python CLI, with optional PDF printing through an already-installed Chrome or Chromium browser.
+- Visualizes category health, pass/partial/fail counts, application-level matrices, ranked next
+  actions, complete evidence, and provenance in one editorial report.
 - Compares scoring rounds with regressions, evidence changes, confidence changes, and applicability
   changes called out explicitly.
 - Records portable package fingerprints and audit provenance so results and vendored copies can be
@@ -58,6 +61,7 @@ agent-readiness-scoring/
 ├── assets/DEFAULT_AGENT_READINESS_PREFERENCES.md
 ├── references/
 │   ├── assessment-format.md
+│   ├── report-workflow.md
 │   ├── remediation-loop.md
 │   └── rubric.json
 ├── evals/scenarios.json
@@ -69,7 +73,8 @@ agent-readiness-scoring/
 ```
 
 `SKILL.md` contains the agent workflow. The rubric and remediation details are loaded only when
-needed. `readiness.py` owns deterministic validation, scoring, comparison, report generation, and
+needed. `report-workflow.md` owns report-only behavior while `remediation-loop.md` owns implementation
+behavior. `readiness.py` owns deterministic validation, scoring, comparison, report generation, and
 package lifecycle checks. The separate `agent_eval.py` is maintainer-facing behavioral test tooling;
 it is not part of ordinary repository scoring.
 
@@ -93,10 +98,22 @@ Validate a completed assessment:
 python3 scripts/readiness.py validate --assessment /tmp/assessment.json
 ```
 
-Generate the report:
+Generate HTML, Markdown, and JSON:
 
 ```bash
 python3 scripts/readiness.py score --assessment /tmp/assessment.json --output-dir /tmp/readiness-report
+```
+
+Also generate a PDF from the exact HTML using an installed Chrome or Chromium browser:
+
+```bash
+python3 scripts/readiness.py score --assessment /tmp/assessment.json --output-dir /tmp/readiness-report --pdf
+```
+
+Embed progress from a previous assessment or report:
+
+```bash
+python3 scripts/readiness.py score --assessment /tmp/assessment.json --previous /tmp/previous-report.json --output-dir /tmp/readiness-report --pdf
 ```
 
 Compare two assessment or report JSON files:
@@ -117,28 +134,33 @@ Initialize repository-specific preferences without overwriting an existing file:
 python3 scripts/readiness.py preferences --output /absolute/path/to/repo/AGENT_READINESS_PREFERENCES.md
 ```
 
-The CLI requires Python 3 and Git. It has no third-party Python dependencies. Both `score` and
-`compare` produce a self-contained, print-ready HTML page in addition to machine-readable JSON and
-reviewable Markdown.
+The CLI requires Python 3 and Git and has no third-party Python dependencies. PDF output additionally
+requires Chrome or Chromium; use `--browser PATH` when auto-discovery cannot find it. The skill never
+downloads a browser automatically. Both `score` and `compare` use the same self-contained HTML as the
+PDF source, so there is no second visual template to drift.
 
 ## Using The Skill With An Agent
 
-Example read-only audit:
+Example read-only report:
 
 ```text
-Use $agent-readiness-scoring to audit this repository. Produce an evidence-backed report, show the
-owned and compatibility scores, and recommend the highest-value next improvements. Do not modify the
-repository.
+Use $agent-readiness-scoring in audit-report mode. Do not modify the repository. Produce an
+evidence-backed HTML and PDF report, show the owned and compatibility scores, and rank the
+highest-value next improvements with effort and authority labels.
 ```
 
 Example autonomous improvement loop:
 
 ```text
-Use $agent-readiness-scoring to audit this repository. Read AGENT_READINESS_PREFERENCES.md, then fix
-one failing criterion at a time with full validation and one scoped commit per capability. Rescore
-after each commit and continue until the owned score reaches 94% or the next action requires new
-authority.
+Use $agent-readiness-scoring in improve-to-target mode. Read AGENT_READINESS_PREFERENCES.md, then fix
+one failing criterion at a time with full validation and one scoped commit per capability. Rescore,
+embed progress from the previous round, and regenerate the HTML/PDF report after each commit. Continue
+until the owned score reaches 94% or the next action requires new authority.
 ```
+
+This remains one skill with four explicit operations: `audit-report`, `compare`, `remediate-one`, and
+`improve-to-target`. The shared rubric, preferences, evidence contract, and renderer remain canonical;
+only the operation-specific reference is loaded.
 
 The skill can ask a fresh auditor for an independent read-only pass when the host supports agent
 delegation. The primary agent must still validate the assessment and must not leak an expected score
@@ -226,10 +248,12 @@ and retains unrelated or formerly managed files rather than deleting them.
 ## Current Status
 
 - Transparent rubric: 82 criteria, version 1.0
-- Package version: 0.2.0 with portable SHA-256 fingerprinting
-- Deterministic suite: 27 scoring/package tests plus 4 behavioral-harness tests
-- Reports: self-contained HTML, Markdown, and JSON
-- Comparisons: regression-first HTML, Markdown, and JSON
+- Package version: 0.3.0 with portable SHA-256 fingerprinting
+- Deterministic suite: 32 scoring/package tests plus 4 behavioral-harness tests
+- Reports: editorial HTML and Chromium-derived PDF plus Markdown and JSON
+- Report contents: category bars, application matrix, authority-aware actions, progress, evidence,
+  and provenance
+- Comparisons: regression-first HTML/PDF, Markdown, and JSON
 - Default branch: `master`
 - Repository visibility: private
 

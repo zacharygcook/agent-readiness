@@ -50,6 +50,24 @@ Create UTF-8 JSON with this shape:
       }
     ]
   },
+  "recommendations": [
+    {
+      "criterion_id": "lint_config",
+      "priority": 1,
+      "rationale": "A shared lint command removes a common source of unsafe agent handoffs.",
+      "effort": "small",
+      "authority": "autonomous",
+      "flags": []
+    },
+    {
+      "criterion_id": "distributed_tracing",
+      "priority": 2,
+      "rationale": "Tracing would close a production diagnostic gap but requires a vendor and architecture decision.",
+      "effort": "large",
+      "authority": "approval_required",
+      "flags": ["paid_service", "large_refactor"]
+    }
+  ],
   "criteria": {
     "readme": {
       "status": "pass",
@@ -89,3 +107,9 @@ For a new audit, preserve it and append every command or external-state check ac
 summaries under 500 characters, commands on one line, and never store secrets or large raw output.
 Give external checks a `fresh_until` timestamp when their truth can change; stale evidence is then
 surfaced in generated reports.
+
+`recommendations` is optional for legacy assessments. New audits should provide three to eight when
+failures exist. Use unique positive priorities, known criterion IDs, a concise repository-specific
+rationale, `small`/`medium`/`large` effort, and `autonomous`/`approval_required`/`deferred` authority.
+Allowed flags are `paid_service`, `external_account`, `large_refactor`, and `production_change`.
+Recommendations guide the report; they do not grant implementation permission.

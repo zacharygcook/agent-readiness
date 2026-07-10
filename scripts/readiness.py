@@ -10,6 +10,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,12 +29,21 @@ CORE_DISTRIBUTABLE_FILES = (
     "agents/openai.yaml",
     "assets/DEFAULT_AGENT_READINESS_PREFERENCES.md",
     "references/assessment-format.md",
+    "references/report-workflow.md",
     "references/remediation-loop.md",
     "references/rubric.json",
     "scripts/readiness.py",
 )
 ALLOWED_STATUSES = {"pass", "fail", "not_applicable"}
 ALLOWED_CONFIDENCE = {"high", "medium", "low"}
+ALLOWED_EFFORT = {"small", "medium", "large"}
+ALLOWED_AUTHORITY = {"autonomous", "approval_required", "deferred"}
+ALLOWED_RECOMMENDATION_FLAGS = {
+    "external_account",
+    "large_refactor",
+    "paid_service",
+    "production_change",
+}
 CATEGORY_TITLES = {
     "style_validation": "Style & Validation",
     "build_system": "Build System",
@@ -251,6 +261,7 @@ def create_skeleton(repo: Path, applications: list[tuple[str, str]], rubric: dic
             "applications": list(app_map),
             "evidence_checks": [],
         },
+        "recommendations": [],
         "criteria": criteria,
     }
 
@@ -342,6 +353,50 @@ def validate_provenance(value: Any) -> list[str]:
     return errors
 
 
+def validate_recommendations(value: Any, criterion_ids: set[str]) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return ["recommendations must be an array when provided."]
+    errors: list[str] = []
+    priorities: set[int] = set()
+    recommended: set[str] = set()
+    for index, recommendation in enumerate(value):
+        label = f"recommendations[{index}]"
+        if not isinstance(recommendation, dict):
+            errors.append(f"{label} must be an object.")
+            continue
+        criterion_id = recommendation.get("criterion_id")
+        if criterion_id not in criterion_ids:
+            errors.append(f"{label}.criterion_id must identify a rubric criterion.")
+        elif criterion_id in recommended:
+            errors.append(f"{label}.criterion_id must not be duplicated.")
+        else:
+            recommended.add(criterion_id)
+        priority = recommendation.get("priority")
+        if isinstance(priority, bool) or not isinstance(priority, int) or priority < 1:
+            errors.append(f"{label}.priority must be a positive integer.")
+        elif priority in priorities:
+            errors.append(f"{label}.priority must be unique.")
+        else:
+            priorities.add(priority)
+        rationale = recommendation.get("rationale")
+        if not isinstance(rationale, str) or not rationale.strip():
+            errors.append(f"{label}.rationale must be a non-empty string.")
+        elif len(rationale) > 500:
+            errors.append(f"{label}.rationale exceeds 500 characters.")
+        if recommendation.get("effort") not in ALLOWED_EFFORT:
+            errors.append(f"{label}.effort must be small, medium, or large.")
+        if recommendation.get("authority") not in ALLOWED_AUTHORITY:
+            errors.append(f"{label}.authority must be autonomous, approval_required, or deferred.")
+        flags = recommendation.get("flags", [])
+        if not isinstance(flags, list) or any(flag not in ALLOWED_RECOMMENDATION_FLAGS for flag in flags):
+            errors.append(
+                f"{label}.flags may contain only: {', '.join(sorted(ALLOWED_RECOMMENDATION_FLAGS))}."
+            )
+    return errors
+
+
 def validate_assessment(assessment: dict[str, Any], rubric: dict[str, Any]) -> None:
     errors: list[str] = []
     if assessment.get("schema_version") != "1.0":
@@ -365,6 +420,7 @@ def validate_assessment(assessment: dict[str, Any], rubric: dict[str, Any]) -> N
         errors.append("criteria must be an object.")
         entries = {}
     rubric_by_id = {criterion["id"]: criterion for criterion in rubric["criteria"]}
+    errors.extend(validate_recommendations(assessment.get("recommendations"), set(rubric_by_id)))
     missing = sorted(set(rubric_by_id) - set(entries))
     extra = sorted(set(entries) - set(rubric_by_id))
     if missing:
@@ -494,6 +550,7 @@ def render_markdown(
     assessment: dict[str, Any],
     rubric: dict[str, Any],
     scores: list[CriterionScore],
+    progress: dict[str, Any] | None = None,
 ) -> str:
     definitions = {criterion["id"]: criterion for criterion in rubric["criteria"]}
     entries = assessment["criteria"]
@@ -556,6 +613,39 @@ def render_markdown(
                 f"failing: {units}. {definition['guidance']}"
             )
 
+    actions, recommendations_ranked = next_actions(assessment, definitions, scores)
+    lines.extend(["", "## Highest-Value Next Actions", ""])
+    if not actions:
+        lines.append("- None. All applicable criteria pass.")
+    else:
+        if not recommendations_ranked:
+            lines.append(
+                "_No agent-ranked recommendations were supplied; these candidates are ordered by "
+                "level and score gap and still require repository-aware prioritization._"
+            )
+            lines.append("")
+        for action in actions:
+            flags = ", ".join(action["flags"]) if action["flags"] else "none"
+            lines.append(
+                f"{action['priority']}. **{action['title']}** (`{action['criterion_id']}`) — "
+                f"effort: {action['effort']}; authority: {action['authority']}; flags: {flags}. "
+                f"{action['rationale']}"
+            )
+
+    lines.extend(["", "## Progress Since Previous Round", ""])
+    if progress is None:
+        lines.append("- No previous assessment was supplied for comparison.")
+    else:
+        progress_summary = progress["summary"]
+        lines.extend(
+            [
+                f"- Owned score delta: **{signed(progress_summary['owned_percentage_delta'])} points**",
+                f"- Improvements: **{progress_summary['improvement_count']}**",
+                f"- Regressions: **{progress_summary['regression_count']}**",
+                f"- Changed criteria: **{progress_summary['changed_criteria']}**",
+            ]
+        )
+
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for definition in rubric["criteria"]:
         grouped[definition["category"]].append(definition)
@@ -601,6 +691,117 @@ def render_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def ratio_state(ratio: float | None) -> str:
+    if ratio is None:
+        return "skipped"
+    if ratio == 1:
+        return "pass"
+    if ratio == 0:
+        return "fail"
+    return "partial"
+
+
+def score_breakdown(
+    scores: list[CriterionScore],
+    definitions: dict[str, dict[str, Any]],
+) -> tuple[dict[str, int], dict[str, dict[str, float | int]]]:
+    overall = {"pass": 0, "partial": 0, "fail": 0, "skipped": 0}
+    category_values: dict[str, list[CriterionScore]] = defaultdict(list)
+    for score in scores:
+        overall[ratio_state(score.owned_ratio)] += 1
+        category_values[definitions[score.criterion_id]["category"]].append(score)
+    categories: dict[str, dict[str, float | int]] = {}
+    for category in CATEGORY_TITLES:
+        values = category_values.get(category, [])
+        applicable = [score.owned_ratio for score in values if score.owned_ratio is not None]
+        counts = {"pass": 0, "partial": 0, "fail": 0, "skipped": 0}
+        for score in values:
+            counts[ratio_state(score.owned_ratio)] += 1
+        categories[category] = {
+            "percentage": round(sum(applicable) * 100 / len(applicable), 4) if applicable else 0.0,
+            "points_earned": round(sum(applicable), 4),
+            "points_available": len(applicable),
+            "total": len(values),
+            **counts,
+        }
+    return overall, categories
+
+
+def application_breakdown(assessment: dict[str, Any], rubric: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    app_definitions = [definition for definition in rubric["criteria"] if definition["scope"] == "application"]
+    for app_id, application in assessment["repository"]["applications"].items():
+        counts = {"pass": 0, "fail": 0, "not_applicable": 0}
+        for definition in app_definitions:
+            judgment = assessment["criteria"][definition["id"]]["applications"][app_id]
+            counts[judgment["status"]] += 1
+        applicable = counts["pass"] + counts["fail"]
+        result[app_id] = {
+            "path": application["path"],
+            "description": application["description"],
+            "percentage": round(counts["pass"] * 100 / applicable, 4) if applicable else 0.0,
+            "applicable": applicable,
+            **counts,
+        }
+    return result
+
+
+def next_actions(
+    assessment: dict[str, Any],
+    definitions: dict[str, dict[str, Any]],
+    scores: list[CriterionScore],
+) -> tuple[list[dict[str, Any]], bool]:
+    score_by_id = {score.criterion_id: score for score in scores}
+    recommendations = assessment.get("recommendations", [])
+    if recommendations:
+        actions = []
+        for recommendation in sorted(recommendations, key=lambda item: item["priority"]):
+            criterion_id = recommendation["criterion_id"]
+            score = score_by_id[criterion_id]
+            definition = definitions[criterion_id]
+            actions.append(
+                {
+                    **recommendation,
+                    "title": definition["title"],
+                    "level": definition["level"],
+                    "current_percentage": None if score.owned_ratio is None else round(score.owned_ratio * 100, 2),
+                    "failing_units": list(score.failing_units),
+                    "source": "assessment",
+                }
+            )
+        return actions, True
+    failures = [
+        score for score in scores
+        if score.owned_ratio is not None and score.owned_ratio < 1
+    ]
+    failures.sort(
+        key=lambda score: (
+            definitions[score.criterion_id]["level"],
+            score.owned_ratio if score.owned_ratio is not None else 1,
+            definitions[score.criterion_id]["title"],
+        )
+    )
+    actions = []
+    for priority, score in enumerate(failures[:8], start=1):
+        definition = definitions[score.criterion_id]
+        actions.append(
+            {
+                "criterion_id": score.criterion_id,
+                "title": definition["title"],
+                "level": definition["level"],
+                "priority": priority,
+                "rationale": definition["guidance"],
+                "effort": "unclassified",
+                "authority": "unclassified",
+                "flags": [],
+                "current_percentage": round((score.owned_ratio or 0) * 100, 2),
+                "failing_units": list(score.failing_units),
+                "source": "fallback",
+            }
+        )
+    return actions, False
+
+
 def report_payload(
     assessment: dict[str, Any],
     rubric: dict[str, Any],
@@ -609,18 +810,15 @@ def report_payload(
     definitions = {criterion["id"]: criterion for criterion in rubric["criteria"]}
     owned_percentage = overall_percentage(scores, "owned_ratio")
     compatibility_percentage = overall_percentage(scores, "compatibility_ratio")
-    category_scores: dict[str, list[float]] = defaultdict(list)
-    for score in scores:
-        if score.owned_ratio is not None:
-            category_scores[definitions[score.criterion_id]["category"]].append(score.owned_ratio)
+    status_counts, category_breakdown = score_breakdown(scores, definitions)
     category_summary = {
-        category: round(sum(values) * 100 / len(values), 4) if values else 0.0
-        for category in CATEGORY_TITLES
-        for values in [category_scores.get(category, [])]
+        category: values["percentage"] for category, values in category_breakdown.items()
     }
+    actions, recommendations_ranked = next_actions(assessment, definitions, scores)
     provenance = assessment.get("provenance", {})
     return {
         "schema_version": "1.0",
+        "report_version": "2.0",
         "rubric_version": rubric["version"],
         "repository": assessment["repository"],
         "preferences": assessment.get("preferences", {}),
@@ -634,7 +832,12 @@ def report_payload(
             "applicable_criteria": sum(score.owned_ratio is not None for score in scores),
             "skipped_criteria": sum(score.owned_ratio is None for score in scores),
             "categories": category_summary,
+            "category_breakdown": category_breakdown,
+            "status_counts": status_counts,
         },
+        "applications": application_breakdown(assessment, rubric),
+        "next_actions": actions,
+        "recommendations_ranked": recommendations_ranked,
         "criteria": {
             score.criterion_id: {
                 "title": definitions[score.criterion_id]["title"],
@@ -696,64 +899,321 @@ def format_ratio(value: float | None) -> str:
     return "Skipped" if value is None else f"{value * 100:.0f}%"
 
 
+def status_text(status: str) -> str:
+    return status.replace("_", " ").title()
+
+
+def render_category_chart(summary: dict[str, Any]) -> str:
+    breakdown = summary.get("category_breakdown", {})
+    if not breakdown:
+        breakdown = {
+            key: {"percentage": value, "pass": 0, "partial": 0, "fail": 0, "skipped": 0, "total": 0}
+            for key, value in summary.get("categories", {}).items()
+        }
+    rows: list[str] = []
+    for key, values in breakdown.items():
+        total = values.get("total", 0) or 1
+        segments = "".join(
+            f'<i class="segment {state}" style="width:{values.get(state, 0) * 100 / total:.4f}%" '
+            f'title="{state.title()}: {values.get(state, 0)}"></i>'
+            for state in ("pass", "partial", "fail", "skipped")
+            if values.get(state, 0)
+        )
+        percentage = float(values.get("percentage", 0))
+        rows.append(
+            f'<article class="category-row" style="grid-template-columns:200px 1fr"><div class="category-heading" '
+            f'style="display:grid;grid-template-columns:1fr auto;align-items:start"><div><span class="kicker">Area</span>'
+            f'<h3>{escape(CATEGORY_TITLES.get(key, key))}</h3></div><strong style="font-size:18px">{percentage:.1f}%</strong></div>'
+            f'<div class="category-track" role="img" aria-label="{escape(CATEGORY_TITLES.get(key, key))}: {percentage:.1f} percent met">'
+            f'{segments}<b class="score-marker" style="left:{max(0, min(100, percentage)):.4f}%"></b></div>'
+            f'<div class="legend-line"><span><i class="dot pass"></i>{values.get("pass", 0)} pass</span>'
+            f'<span><i class="dot partial"></i>{values.get("partial", 0)} partial</span>'
+            f'<span><i class="dot fail"></i>{values.get("fail", 0)} fail</span>'
+            f'<span><i class="dot skipped"></i>{values.get("skipped", 0)} N/A</span></div></article>'
+        )
+    return "".join(rows)
+
+
+def render_next_actions(payload: dict[str, Any]) -> str:
+    actions = payload.get("next_actions", [])
+    if not actions:
+        return '<article class="empty-state">Every applicable criterion passes. Protect the baseline and watch for regressions.</article>'
+    cards: list[str] = []
+    flag_titles = {
+        "external_account": "External account",
+        "large_refactor": "Large refactor",
+        "paid_service": "Paid service",
+        "production_change": "Production change",
+    }
+    for action in actions:
+        authority = action.get("authority", "unclassified")
+        current_percentage = action.get("current_percentage")
+        current_label = "N/A" if current_percentage is None else f"{current_percentage:.0f}%"
+        badges = [
+            f'<span class="badge authority-{escape(authority)}">{escape(status_text(authority))}</span>',
+            f'<span class="badge">{escape(status_text(action.get("effort", "unclassified")))} effort</span>',
+        ]
+        badges.extend(
+            f'<span class="badge flag">{escape(flag_titles.get(flag, status_text(flag)))}</span>'
+            for flag in action.get("flags", [])
+        )
+        units = ", ".join(action.get("failing_units", [])) or "repository"
+        cards.append(
+            f'<article class="action-card"><div class="action-number">{action["priority"]:02d}</div>'
+            f'<div><div class="badge-row">{"".join(badges)}</div><h3>{escape(action["title"])}</h3>'
+            f'<p>{escape(action["rationale"])}</p><div class="action-meta"><code>{escape(action["criterion_id"])}</code>'
+            f'<span>Level {action["level"]}</span><span>{current_label} currently met</span>'
+            f'<span>Gap: {escape(units)}</span></div></div></article>'
+        )
+    notice = ""
+    if not payload.get("recommendations_ranked"):
+        notice = (
+            '<p class="notice"><strong>Mechanical fallback:</strong> the assessment did not include an agent-ranked '
+            "recommendation set, so these candidates are ordered by readiness level and score gap. "
+            "Confirm repository value and authority before acting.</p>"
+        )
+    return notice + "".join(cards)
+
+
+def render_application_section(payload: dict[str, Any]) -> str:
+    applications = payload.get("applications", {})
+    cards = "".join(
+        f'<article class="application-card"><div><span class="kicker">Application</span><h3>{escape(app_id)}</h3>'
+        f'<p>{escape(values.get("description", ""))}</p><code>{escape(values.get("path", ""))}</code></div>'
+        f'<div class="application-score"><strong>{values.get("percentage", 0):.1f}%</strong>'
+        f'<span>{values.get("pass", 0)} pass / {values.get("fail", 0)} fail / {values.get("not_applicable", 0)} N/A</span></div></article>'
+        for app_id, values in applications.items()
+    )
+    app_ids = list(payload.get("repository", {}).get("applications", {}))
+    header = "".join(f"<th>{escape(app_id)}</th>" for app_id in app_ids)
+    rows: list[str] = []
+    for criterion_id, criterion in payload["criteria"].items():
+        if criterion["scope"] != "application":
+            continue
+        judgments = report_judgments(criterion)
+        cells = "".join(
+            f'<td><span class="matrix-status {escape(judgments.get(app_id, {}).get("status", "unknown"))}">'
+            f'{escape(status_text(judgments.get(app_id, {}).get("status", "unknown")))}</span></td>'
+            for app_id in app_ids
+        )
+        rows.append(
+            f'<tr data-category="{escape(criterion["category"])}" data-search="{escape((criterion["title"] + " " + criterion_id).lower())}">'
+            f'<td><strong>{escape(criterion["title"])}</strong><code>{escape(criterion_id)}</code></td>'
+            f'<td>{escape(CATEGORY_TITLES[criterion["category"]])}</td>{cells}</tr>'
+        )
+    matrix = (
+        '<div class="matrix-tools no-print"><label>Filter area <select id="matrix-category"><option value="">All areas</option>'
+        + "".join(f'<option value="{escape(key)}">{escape(title)}</option>' for key, title in CATEGORY_TITLES.items())
+        + '</select></label><label>Find criterion <input id="matrix-search" type="search" placeholder="Type a name or ID"></label></div>'
+        + f'<div class="table-scroll"><table class="matrix"><thead><tr><th>Criterion</th><th>Area</th>{header}</tr></thead>'
+        + f'<tbody>{"".join(rows)}</tbody></table></div>'
+    )
+    return f'<div class="application-grid">{cards}</div>{matrix}'
+
+
+def render_failure_groups(payload: dict[str, Any]) -> str:
+    grouped: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+    for criterion_id, criterion in payload["criteria"].items():
+        if criterion["owned"]["ratio"] not in {None, 1.0}:
+            grouped[criterion["category"]].append((criterion_id, criterion))
+    if not grouped:
+        return '<article class="empty-state">No applicable failures.</article>'
+    sections: list[str] = []
+    for category in CATEGORY_TITLES:
+        failures = grouped.get(category, [])
+        if not failures:
+            continue
+        items = "".join(
+            f'<article class="failure-card"><div class="failure-score">{format_ratio(item["owned"]["ratio"])}</div>'
+            f'<div><span class="kicker">Level {item["level"]}</span><h3>{escape(item["title"])}</h3>'
+            f'<p>{escape(item["guidance"])}</p><div class="action-meta"><code>{escape(criterion_id)}</code>'
+            f'<span>Failing: {escape(", ".join(item["failing_units"]) or "partial")}</span></div></div></article>'
+            for criterion_id, item in sorted(failures, key=lambda pair: (pair[1]["level"], pair[1]["title"]))
+        )
+        sections.append(f'<section class="failure-group"><h3>{escape(CATEGORY_TITLES[category])}</h3>{items}</section>')
+    return "".join(sections)
+
+
+def render_evidence(payload: dict[str, Any]) -> str:
+    sections: list[str] = []
+    for identifier, item in payload["criteria"].items():
+        judgments: list[str] = []
+        for unit, judgment in report_judgments(item).items():
+            evidence = "".join(f"<li>{escape(value)}</li>" for value in judgment.get("evidence", []))
+            status = judgment.get("status", "unknown")
+            judgments.append(
+                f'<article class="judgment"><div class="judgment-heading"><strong>{escape(unit)}</strong>'
+                f'<span class="matrix-status {escape(status)}">{escape(status_text(status))}</span>'
+                f'<span class="confidence">{escape(judgment.get("confidence", "unknown"))} confidence</span></div>'
+                f'<p>{escape(judgment.get("rationale", ""))}</p><ul>{evidence}</ul></article>'
+            )
+        sections.append(
+            f'<details><summary><span><b>{escape(item["title"])}</b><small>{escape(CATEGORY_TITLES[item["category"]])} / Level {item["level"]}</small></span>'
+            f'<code>{escape(identifier)}</code></summary>{"".join(judgments)}</details>'
+        )
+    return "".join(sections)
+
+
+def render_provenance(payload: dict[str, Any]) -> str:
+    provenance = payload.get("provenance", {})
+    checks = provenance.get("evidence_checks", []) if isinstance(provenance, dict) else []
+    check_rows = "".join(
+        f'<tr><td>{escape(check.get("label", "check"))}</td><td>{escape(status_text(check.get("kind", "unknown")))}</td>'
+        f'<td>{escape(check.get("checked_at", "unknown"))}</td><td>{escape(check.get("exit_status", "n/a"))}</td>'
+        f'<td>{escape(check.get("summary", ""))}</td></tr>'
+        for check in checks if isinstance(check, dict)
+    ) or '<tr><td colspan="5">No structured evidence checks were recorded.</td></tr>'
+    fields = (
+        ("Rubric", payload.get("rubric_version", "unknown")),
+        ("Skill", provenance.get("skill_version", "legacy") if isinstance(provenance, dict) else "legacy"),
+        ("Skill fingerprint", provenance.get("skill_fingerprint", "unknown") if isinstance(provenance, dict) else "unknown"),
+        ("Preferences", payload.get("preferences", {}).get("source", "skill defaults")),
+        ("Repository dirty", payload.get("repository", {}).get("dirty", "unknown")),
+    )
+    field_cards = "".join(f'<div><span>{escape(label)}</span><strong>{escape(value)}</strong></div>' for label, value in fields)
+    return (
+        f'<div class="provenance-grid">{field_cards}</div><div class="table-scroll"><table><thead><tr>'
+        f'<th>Evidence check</th><th>Kind</th><th>Checked</th><th>Exit</th><th>Summary</th></tr></thead><tbody>{check_rows}</tbody></table></div>'
+    )
+
+
+def render_progress(payload: dict[str, Any]) -> str:
+    progress = payload.get("progress")
+    if not isinstance(progress, dict):
+        return (
+            '<article class="empty-state">No previous assessment was attached. Pass <code>--previous PATH</code> '
+            "on the next scoring round to show improvements, regressions, and evidence changes here.</article>"
+        )
+    summary = progress["summary"]
+    delta = float(summary["owned_percentage_delta"])
+    regression_items = "".join(
+        f'<li><strong>{escape(progress["criteria"][criterion_id]["title"])}</strong>'
+        f'<span>{escape(", ".join(progress["criteria"][criterion_id]["regressions"]) or "score decreased")}</span></li>'
+        for criterion_id in progress.get("regressions", [])
+    ) or "<li><strong>No regressions</strong><span>The new round preserved every previous pass.</span></li>"
+    improvement_items = "".join(
+        f'<li><strong>{escape(progress["criteria"][criterion_id]["title"])}</strong>'
+        f'<span>{escape(", ".join(progress["criteria"][criterion_id]["newly_passing_units"]) or "score increased")}</span></li>'
+        for criterion_id in progress.get("improvements", [])
+    ) or "<li><strong>No newly passing criteria</strong><span>The score may still include evidence-only changes.</span></li>"
+    direction = "positive" if delta >= 0 else "negative"
+    return (
+        f'<div class="progress-hero"><div class="delta {direction}"><span>Owned score delta</span>'
+        f'<strong>{signed(delta)} pts</strong></div><div class="progress-stats">'
+        f'<div><strong>{summary["improvement_count"]}</strong><span>improvements</span></div>'
+        f'<div><strong>{summary["regression_count"]}</strong><span>regressions</span></div>'
+        f'<div><strong>{summary["changed_criteria"]}</strong><span>changed criteria</span></div></div></div>'
+        f'<div class="progress-columns"><article><h3>Newly earned</h3><ul>{improvement_items}</ul></article>'
+        f'<article><h3>Regressions</h3><ul>{regression_items}</ul></article></div>'
+    )
+
+
 def render_html(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     repository = payload["repository"]
-    criteria = payload["criteria"]
-    failures = [criterion for criterion in criteria.values() if criterion["owned"]["ratio"] not in {None, 1.0}]
-    failures.sort(key=lambda criterion: (criterion["level"], criterion["title"]))
-    category_cards = "".join(
-        f'<article class="category"><span>{escape(CATEGORY_TITLES[key])}</span>'
-        f'<strong>{value:.1f}%</strong><div class="bar"><i style="width:{max(0, min(100, value)):.2f}%"></i></div></article>'
-        for key, value in summary.get("categories", {}).items()
-    )
-    failure_items = "".join(
-        f'<li><div><strong>{escape(item["title"])}</strong> <code>{escape(identifier)}</code></div>'
-        f'<span>Level {item["level"]} · failing: {escape(", ".join(item["failing_units"]))}</span>'
-        f'<p>{escape(item["guidance"])}</p></li>'
-        for identifier, item in ((identifier, criteria[identifier]) for identifier in criteria)
-        if item in failures
-    ) or "<li class=\"empty\">All applicable criteria pass.</li>"
-    rows = "".join(
-        f'<tr><td><strong>{escape(item["title"])}</strong><br><code>{escape(identifier)}</code></td>'
-        f'<td>{escape(CATEGORY_TITLES[item["category"]])}</td><td>L{item["level"]}</td>'
-        f'<td>{format_ratio(item["owned"]["ratio"])}</td>'
-        f'<td>{escape(", ".join(item["failing_units"]) or "—")}</td></tr>'
-        for identifier, item in criteria.items()
-    )
-    evidence_sections: list[str] = []
-    for identifier, item in criteria.items():
-        judgment_blocks: list[str] = []
-        for unit, judgment in report_judgments(item).items():
-            evidence = "".join(f"<li>{escape(value)}</li>" for value in judgment.get("evidence", []))
-            judgment_blocks.append(
-                f'<div class="judgment"><div><strong>{escape(unit)}</strong> '
-                f'<span class="status {escape(judgment.get("status", "unknown"))}">{escape(judgment.get("status", "unknown"))}</span> '
-                f'<span class="confidence">{escape(judgment.get("confidence", "unknown"))} confidence</span></div>'
-                f'<p>{escape(judgment.get("rationale", ""))}</p><ul>{evidence}</ul></div>'
-            )
-        evidence_sections.append(
-            f'<details><summary><span>{escape(item["title"])}</span><code>{escape(identifier)}</code></summary>'
-            + "".join(judgment_blocks) + "</details>"
-        )
-    evidence_details = "".join(evidence_sections)
+    counts = summary.get("status_counts", {})
     warnings = payload.get("audit_warnings", [])
     warning_block = ""
     if warnings:
-        warning_block = '<section class="warnings"><h2>Audit warnings</h2><ul>' + "".join(
+        warning_block = '<section class="warning-block report-section"><div class="section-label">Audit warnings</div><ul>' + "".join(
             f"<li>{escape(warning)}</li>" for warning in warnings
         ) + "</ul></section>"
     generated = repository.get("generated_at", "unknown")
     commit = repository.get("commit", "unknown")
+    app_count = len(repository.get("applications", {}))
+    category_chart = render_category_chart(summary)
+    actions = render_next_actions(payload)
+    application_section = render_application_section(payload)
+    failures = render_failure_groups(payload)
+    evidence = render_evidence(payload)
+    provenance = render_provenance(payload)
+    progress = render_progress(payload)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Agent Readiness · {escape(repository.get('name', 'repository'))}</title>
+<meta name="color-scheme" content="light"><title>Agent Readiness - {escape(repository.get('name', 'repository'))}</title>
 <style>
-:root{{--ink:#17141a;--muted:#69616f;--paper:#fffdfb;--panel:#f7f2f6;--accent:#f02d8b;--good:#14855f;--line:#e5dce4}}*{{box-sizing:border-box}}body{{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}}main{{max-width:1120px;margin:auto;padding:54px 28px 80px}}header{{display:grid;grid-template-columns:1fr auto;gap:24px;align-items:end;border-bottom:4px solid var(--ink);padding-bottom:28px}}.eyebrow{{color:var(--accent);font-weight:800;letter-spacing:.12em;text-transform:uppercase}}h1{{font-size:clamp(38px,7vw,76px);line-height:.95;letter-spacing:-.055em;margin:10px 0}}h2{{font-size:27px;letter-spacing:-.03em;margin:44px 0 16px}}.score{{font-size:72px;line-height:.8;font-weight:900;text-align:right}}.score small{{display:block;color:var(--muted);font-size:14px;letter-spacing:.08em;margin-top:18px}}.meta{{color:var(--muted);margin-top:14px}}.grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}}.category{{background:var(--panel);padding:18px;border-radius:12px}}.category span{{display:block;color:var(--muted);min-height:44px}}.category strong{{font-size:27px}}.bar{{height:5px;background:#dfd5de;margin-top:12px}}.bar i{{display:block;height:100%;background:var(--accent)}}ul.failures{{padding:0;list-style:none;display:grid;grid-template-columns:repeat(2,1fr);gap:12px}}.failures li,.warnings{{border:1px solid var(--line);padding:18px;border-radius:12px}}.failures span,.failures p,.confidence{{color:var(--muted)}}code{{background:#efe7ed;padding:2px 6px;border-radius:4px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:12px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{position:sticky;top:0;background:var(--paper)}}.warnings{{border-color:#e5b64e;background:#fff9e9}}details{{border-bottom:1px solid var(--line);padding:13px 2px}}summary{{display:flex;justify-content:space-between;cursor:pointer;font-weight:750}}.judgment{{margin:14px 0;padding:14px 18px;background:var(--panel);border-radius:10px}}.judgment p{{margin:8px 0}}.judgment ul{{margin:6px 0}}.status{{display:inline-block;border-radius:999px;padding:2px 8px;margin-left:8px;font-size:11px;font-weight:800;text-transform:uppercase}}.status.pass{{background:#dff5eb;color:#075f41}}.status.fail{{background:#ffe1e8;color:#961338}}.status.not_applicable{{background:#eae5ea;color:#554e58}}footer{{margin-top:40px;color:var(--muted);font-size:12px}}@media(max-width:760px){{header{{grid-template-columns:1fr}}.score{{text-align:left}}.grid{{grid-template-columns:1fr 1fr}}ul.failures{{grid-template-columns:1fr}}}}@media print{{main{{padding:20px}}.category,.failures li{{break-inside:avoid}}}}
-</style></head><body><main><header><div><div class="eyebrow">Agent readiness report</div><h1>{escape(repository.get('name', 'Repository'))}</h1><div class="meta">{escape(generated)} · <code>{escape(commit)}</code></div></div><div class="score">{summary['owned_percentage']:.1f}%<small>LEVEL {summary['owned_level']} · OWNED</small></div></header>
-<p class="meta">Compatibility view: Level {summary['compatibility_level']} at {summary['compatibility_percentage']:.1f}% · {summary['applicable_criteria']} applicable criteria · {summary['skipped_criteria']} skipped.</p>
-{warning_block}<h2>Category health</h2><section class="grid">{category_cards}</section><h2>Highest-value failures</h2><ul class="failures">{failure_items}</ul><h2>All criteria</h2><table><thead><tr><th>Criterion</th><th>Category</th><th>Level</th><th>Owned</th><th>Failing units</th></tr></thead><tbody>{rows}</tbody></table><h2>Evidence &amp; rationale</h2><section>{evidence_details}</section>
-<footer>Generated by agent-readiness-scoring {escape(payload.get('provenance', {}).get('skill_version', 'legacy'))}. Self-contained and print-ready.</footer></main></body></html>"""
+:root{{--ink:#171217;--muted:#6e636c;--paper:#fffdfb;--paper-deep:#f5f0f2;--panel:#faf6f8;--accent:#ed1f83;--accent-soft:#ffe4f1;--pass:#177a57;--pass-soft:#dff4eb;--partial:#b06b08;--partial-soft:#fff0cc;--fail:#bd3151;--fail-soft:#ffe3e9;--skip:#8a8088;--skip-soft:#ece7eb;--line:#ded4dc;--shadow:0 18px 50px rgba(70,31,55,.09)}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:linear-gradient(145deg,#fffdfb 0%,#fbf6f8 55%,#f4edf1 100%);color:var(--ink);font:15px/1.55 "Avenir Next","Segoe UI",sans-serif}}body:before{{content:"";position:fixed;inset:0;pointer-events:none;opacity:.22;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.07'/%3E%3C/svg%3E")}}main{{position:relative;max-width:1180px;margin:auto;padding:30px 34px 90px}}.toolbar{{display:flex;justify-content:space-between;align-items:center;margin-bottom:42px}}.brand{{font-size:12px;font-weight:850;letter-spacing:.18em;text-transform:uppercase}}.brand i{{display:inline-block;width:9px;height:9px;background:var(--accent);border-radius:50%;margin-right:9px}}button,select,input{{font:inherit}}button{{border:1px solid var(--line);background:rgba(255,255,255,.84);padding:9px 13px;border-radius:999px;color:var(--ink);cursor:pointer}}button.primary{{background:var(--ink);border-color:var(--ink);color:white}}.hero{{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(260px,.6fr);gap:44px;align-items:end;padding:50px 0 38px;border-top:1px solid var(--ink);border-bottom:5px solid var(--ink)}}.eyebrow,.section-label,.kicker{{color:var(--accent);font-size:11px;font-weight:850;letter-spacing:.17em;text-transform:uppercase}}h1,h2,h3,p{{margin-top:0}}h1{{max-width:800px;margin:12px 0 20px;font:700 clamp(54px,8vw,96px)/.88 "Iowan Old Style","Palatino Linotype",serif;letter-spacing:-.065em}}h2{{margin-bottom:12px;font:700 clamp(34px,5vw,58px)/.98 "Iowan Old Style","Palatino Linotype",serif;letter-spacing:-.045em}}h3{{margin-bottom:7px;font-size:18px;line-height:1.2}}.hero-copy{{max-width:660px;color:var(--muted);font-size:17px}}.score-lockup{{text-align:right}}.score-lockup strong{{display:block;font-size:clamp(76px,10vw,128px);font-weight:900;line-height:.75;letter-spacing:-.09em}}.score-lockup span{{display:block;margin-top:24px;font-size:13px;font-weight:850;letter-spacing:.16em;text-transform:uppercase}}.score-lockup em{{display:inline-block;margin-top:8px;padding:5px 10px;background:var(--accent);color:white;font-style:normal;font-weight:850}}.meta-ribbon{{display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid var(--line)}}.meta-ribbon div{{padding:17px 16px;border-right:1px solid var(--line)}}.meta-ribbon div:last-child{{border-right:0}}.meta-ribbon span,.provenance-grid span{{display:block;color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}}.meta-ribbon strong{{display:block;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.report-section{{padding:70px 0;border-bottom:1px solid var(--line)}}.section-intro{{display:grid;grid-template-columns:minmax(0,.7fr) minmax(300px,.3fr);gap:40px;align-items:end;margin-bottom:34px}}.section-intro p{{color:var(--muted);margin-bottom:5px}}.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}}.stat{{padding:16px;background:rgba(255,255,255,.66);border:1px solid var(--line)}}.stat strong{{display:block;font-size:27px}}.stat span{{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.1em}}.category-row{{display:grid;grid-template-columns:220px 1fr;gap:22px;padding:20px 0;border-top:1px solid var(--line)}}.category-heading{{display:flex;justify-content:space-between;gap:14px}}.category-heading h3{{margin:3px 0}}.category-heading strong{{font-size:24px}}.category-track{{position:relative;display:flex;height:22px;margin-top:7px;overflow:hidden;background:var(--skip-soft);border-radius:3px}}.segment{{height:100%}}.segment.pass,.dot.pass{{background:var(--pass)}}.segment.partial,.dot.partial{{background:var(--partial)}}.segment.fail,.dot.fail{{background:var(--fail)}}.segment.skipped,.dot.skipped{{background:var(--skip)}}.score-marker{{position:absolute;top:-5px;bottom:-5px;width:3px;background:var(--ink);transform:translateX(-1px)}}.legend-line{{display:flex;gap:15px;margin-top:8px;color:var(--muted);font-size:11px}}.dot{{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}}.notice,.warning-block{{padding:17px 20px;background:#fff8dd;border-left:5px solid #e1a321;color:#6d571a}}.action-card{{display:grid;grid-template-columns:70px 1fr;gap:22px;padding:25px 0;border-top:1px solid var(--line);break-inside:avoid}}.action-number{{color:var(--accent);font:700 43px/1 "Iowan Old Style",serif}}.badge-row,.action-meta{{display:flex;flex-wrap:wrap;gap:7px;align-items:center}}.badge{{display:inline-block;padding:4px 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}}.authority-autonomous{{background:var(--pass-soft);border-color:#afd8c6;color:#0b6848}}.authority-approval_required{{background:var(--partial-soft);border-color:#e8c979;color:#805100}}.authority-deferred,.flag{{background:var(--fail-soft);border-color:#e7aabb;color:#8e193b}}.action-card h3{{margin:10px 0 5px;font:700 25px/1.1 "Iowan Old Style",serif}}.action-card p,.failure-card p,.application-card p{{color:var(--muted)}}code{{display:inline-block;max-width:100%;overflow-wrap:anywhere;background:#eee6eb;padding:2px 6px;border-radius:3px;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}}.action-meta{{color:var(--muted);font-size:11px}}.application-grid{{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:30px}}.application-card{{display:flex;justify-content:space-between;gap:24px;padding:22px;background:rgba(255,255,255,.7);border:1px solid var(--line);box-shadow:var(--shadow);break-inside:avoid}}.application-card p{{margin-bottom:8px}}.application-score{{min-width:130px;text-align:right}}.application-score strong{{display:block;font-size:36px}}.application-score span{{color:var(--muted);font-size:11px}}.matrix-tools{{display:flex;gap:12px;margin:18px 0}}.matrix-tools label{{color:var(--muted);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em}}select,input{{display:block;min-width:220px;margin-top:5px;padding:9px;border:1px solid var(--line);background:white;color:var(--ink)}}.table-scroll{{overflow-x:auto;border:1px solid var(--line);background:rgba(255,255,255,.65)}}table{{width:100%;border-collapse:collapse;font-size:12px}}th,td{{padding:11px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}th{{background:#f1eaee;font-size:10px;letter-spacing:.08em;text-transform:uppercase}}tbody tr:last-child td{{border-bottom:0}}.matrix td:first-child strong,.matrix td:first-child code{{display:block}}.matrix-status{{display:inline-block;padding:3px 7px;border-radius:999px;font-size:9px;font-weight:850;letter-spacing:.05em;text-transform:uppercase;white-space:nowrap}}.matrix-status.pass{{background:var(--pass-soft);color:#0b6848}}.matrix-status.fail{{background:var(--fail-soft);color:#941a3c}}.matrix-status.not_applicable{{background:var(--skip-soft);color:#645a62}}.failure-group{{margin-top:34px}}.failure-group>h3{{padding-bottom:9px;border-bottom:3px solid var(--ink);font-size:13px;letter-spacing:.12em;text-transform:uppercase}}.failure-card{{display:grid;grid-template-columns:85px 1fr;gap:20px;padding:19px 0;border-bottom:1px solid var(--line);break-inside:avoid}}.failure-score{{font-size:28px;font-weight:900}}details{{border-top:1px solid var(--line)}}summary{{display:flex;justify-content:space-between;gap:16px;padding:15px 0;cursor:pointer;list-style:none}}summary::-webkit-details-marker{{display:none}}summary small{{display:block;color:var(--muted);font-weight:400}}.judgment{{margin:0 0 14px;padding:18px;background:rgba(255,255,255,.7);border-left:3px solid var(--line);break-inside:avoid}}.judgment-heading{{display:flex;flex-wrap:wrap;gap:8px;align-items:center}}.confidence{{color:var(--muted);font-size:11px}}.judgment p{{margin:10px 0 5px}}.judgment ul{{margin:4px 0;padding-left:20px;color:var(--muted)}}.provenance-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:20px}}.provenance-grid div{{padding:15px;border:1px solid var(--line);background:rgba(255,255,255,.6)}}.provenance-grid strong{{display:block;margin-top:4px;overflow-wrap:anywhere;font-size:12px}}.empty-state{{padding:30px;border:1px dashed var(--line);color:var(--muted);text-align:center}}.document-footer{{display:flex;justify-content:space-between;gap:20px;padding:30px 0;color:var(--muted);font-size:11px}}.print-footer{{display:none}}@media(max-width:820px){{main{{padding:22px 20px 70px}}.hero,.section-intro{{grid-template-columns:1fr}}.score-lockup{{text-align:left}}.meta-ribbon{{grid-template-columns:1fr 1fr}}.meta-ribbon div{{border-bottom:1px solid var(--line)}}.stats{{grid-template-columns:1fr 1fr}}.category-row{{grid-template-columns:1fr}}.application-grid{{grid-template-columns:1fr}}.provenance-grid{{grid-template-columns:1fr 1fr}}.toolbar-actions button:not(.primary){{display:none}}}}@media print{{@page{{size:Letter;margin:.55in}}body{{background:white;font-size:10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}}body:before,.no-print{{display:none!important}}main{{max-width:none;padding:0}}.toolbar{{display:none}}.hero{{min-height:8.3in;align-content:center;break-after:page}}h1{{font-size:66px}}h2{{font-size:35px}}.score-lockup strong{{font-size:94px}}.report-section{{padding:30px 0}}.report-section.major{{break-before:page}}.section-intro{{margin-bottom:20px}}.category-row{{grid-template-columns:165px 1fr;padding:12px 0}}.category-track{{height:15px}}.action-card{{padding:14px 0}}.application-card{{box-shadow:none}}.table-scroll{{overflow:visible}}table{{font-size:8px}}th,td{{padding:6px}}details{{break-inside:auto}}details>*:not(summary){{display:block!important}}summary{{padding:9px 0}}.judgment{{padding:10px;margin-bottom:8px}}.document-footer{{display:none}}.print-footer{{display:block;position:fixed;left:0;right:0;bottom:-.34in;padding-top:5px;border-top:1px solid var(--line);color:var(--muted);font-size:8px}}}}
+</style><style>
+.progress-hero{{display:grid;grid-template-columns:.8fr 1.2fr;gap:14px}}.delta,.progress-stats>div{{padding:22px;border:1px solid var(--line);background:rgba(255,255,255,.7)}}.delta span,.progress-stats span{{display:block;color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}}.delta strong{{display:block;margin-top:8px;font-size:44px}}.delta.positive strong{{color:var(--pass)}}.delta.negative strong{{color:var(--fail)}}.progress-stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}.progress-stats strong{{display:block;font-size:30px}}.progress-columns{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}}.progress-columns article{{padding:20px;border:1px solid var(--line);background:rgba(255,255,255,.55)}}.progress-columns ul{{list-style:none;margin:0;padding:0}}.progress-columns li{{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-top:1px solid var(--line)}}.progress-columns li span{{color:var(--muted);font-size:11px;text-align:right}}@media(max-width:820px){{.progress-columns,.progress-hero{{grid-template-columns:1fr}}}}
+</style><style>
+@media print{{.hero{{min-height:7.2in;break-after:avoid}}.meta-ribbon{{break-after:page}}.category-row{{grid-template-columns:200px 1fr}}.category-heading{{display:grid;grid-template-columns:1fr auto;align-items:start}}.category-heading strong{{font-size:18px}}.print-footer{{display:none!important}}}}
+</style></head><body><main><div class="toolbar no-print"><div class="brand"><i></i>Agent Readiness / Evidence Dossier</div><div class="toolbar-actions"><button id="collapse-all">Collapse evidence</button><button id="expand-all">Expand evidence</button><button class="primary" onclick="window.print()">Print / Save PDF</button></div></div>
+<header class="hero" style="min-height:7.2in;break-after:avoid"><div><div class="eyebrow">Repository capability audit</div><h1>{escape(repository.get('name', 'Repository'))}</h1><p class="hero-copy">An evidence-backed measure of how safely and effectively coding agents can understand, change, verify, and operate this repository.</p></div><div class="score-lockup"><strong>{summary['owned_percentage']:.1f}%</strong><span>Owned readiness</span><em>Level {summary['owned_level']}</em></div></header>
+<section class="meta-ribbon" style="break-after:page"><div><span>Compatibility</span><strong>{summary['compatibility_percentage']:.1f}% / Level {summary['compatibility_level']}</strong></div><div><span>Applications</span><strong>{app_count}</strong></div><div><span>Commit</span><strong>{escape(commit[:12])}</strong></div><div><span>Audit state</span><strong>{'Dirty working tree' if repository.get('dirty') else 'Clean commit'}</strong></div><div><span>Generated</span><strong>{escape(generated)}</strong></div></section>
+{warning_block}<section id="health" class="report-section major"><div class="section-intro"><div><div class="section-label">01 / Category health</div><h2>Where agents can move confidently.</h2></div><div class="stats"><div class="stat"><strong>{counts.get('pass', 0)}</strong><span>Passing</span></div><div class="stat"><strong>{counts.get('partial', 0)}</strong><span>Partial</span></div><div class="stat"><strong>{counts.get('fail', 0)}</strong><span>Failing</span></div><div class="stat"><strong>{counts.get('skipped', 0)}</strong><span>Not applicable</span></div></div></div>{category_chart}</section>
+<section id="progress" class="report-section major"><div class="section-intro"><div><div class="section-label">02 / Progress</div><h2>What changed since the last round.</h2></div><p>Score movement is secondary to durable capability gains. Regressions remain prominent even when the total score rises.</p></div>{progress}</section>
+<section id="actions" class="report-section major"><div class="section-intro"><div><div class="section-label">03 / Priority queue</div><h2>The next capabilities worth earning.</h2></div><p>Ranked work should reflect repository value, dependency order, implementation effort, and the authority required to proceed - never score points alone.</p></div>{actions}</section>
+<section id="applications" class="report-section major"><div class="section-intro"><div><div class="section-label">04 / Application surface</div><h2>Readiness is rarely uniform.</h2></div><p>Application-scoped criteria expose where one deployable surface is safe for agents while another still carries operational risk.</p></div>{application_section}</section>
+<section id="failures" class="report-section major"><div class="section-intro"><div><div class="section-label">05 / Capability gaps</div><h2>Every failure, without camouflage.</h2></div><p>Partial results remain visible. Inapplicable applications are excluded from the owned denominator but preserved for auditability.</p></div>{failures}</section>
+<section id="evidence" class="report-section major"><div class="section-intro"><div><div class="section-label">06 / Evidence ledger</div><h2>Why each judgment exists.</h2></div><p>Paths, commands, rationale, confidence, and applicability are the durable record. Expand any criterion to inspect its evidence.</p></div>{evidence}</section>
+<section id="provenance" class="report-section major"><div class="section-intro"><div><div class="section-label">07 / Provenance</div><h2>Trust the report's lineage.</h2></div><p>Version, preferences, repository state, and freshness checks make this assessment reproducible and honest about external evidence.</p></div>{provenance}</section>
+<footer class="document-footer"><span>agent-readiness-scoring {escape(payload.get('provenance', {}).get('skill_version', 'legacy'))}</span><span>Owned score excludes genuinely inapplicable application surfaces.</span></footer></main>
+<script>const details=[...document.querySelectorAll('details')];document.getElementById('collapse-all').addEventListener('click',()=>details.forEach(item=>item.open=false));document.getElementById('expand-all').addEventListener('click',()=>details.forEach(item=>item.open=true));const category=document.getElementById('matrix-category');const search=document.getElementById('matrix-search');function filterMatrix(){{const term=(search.value||'').toLowerCase();document.querySelectorAll('.matrix tbody tr').forEach(row=>{{row.hidden=Boolean(category.value&&row.dataset.category!==category.value)||Boolean(term&&!row.dataset.search.includes(term));}})}}category.addEventListener('change',filterMatrix);search.addEventListener('input',filterMatrix);window.addEventListener('beforeprint',()=>details.forEach(item=>item.open=true));</script></body></html>"""
+
+
+def find_chromium(explicit: Path | None = None) -> Path | None:
+    if explicit is not None:
+        candidate = explicit.expanduser().resolve()
+        if not candidate.is_file():
+            raise AssessmentError(f"PDF browser executable not found: {candidate}")
+        return candidate
+    for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome"):
+        found = shutil.which(name)
+        if found:
+            return Path(found).resolve()
+    for candidate in (
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def render_pdf(html_path: Path, pdf_path: Path, browser: Path | None = None) -> Path:
+    executable = find_chromium(browser)
+    if executable is None:
+        raise AssessmentError(
+            "PDF output requires an installed Chrome or Chromium browser. Install one or pass --browser PATH; "
+            "the skill will not download a browser automatically."
+        )
+    source = html_path.resolve()
+    destination = pdf_path.resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        destination.unlink()
+    try:
+        with tempfile.TemporaryDirectory(prefix="agent-readiness-pdf-") as profile:
+            result = subprocess.run(
+                [
+                    str(executable),
+                    "--headless=new",
+                    "--disable-gpu",
+                    "--no-pdf-header-footer",
+                    "--allow-file-access-from-files",
+                    "--run-all-compositor-stages-before-draw",
+                    "--virtual-time-budget=1500",
+                    f"--user-data-dir={profile}",
+                    f"--print-to-pdf={destination}",
+                    source.as_uri(),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+    except subprocess.TimeoutExpired as error:
+        # Chrome occasionally finishes printing a large document and then lingers while shutting
+        # down its isolated profile. The PDF is the contract, so accept a completed artifact even
+        # when the browser process misses the cleanup deadline.
+        if destination.is_file() and destination.stat().st_size >= 1000:
+            return destination
+        raise AssessmentError("Chromium PDF rendering timed out after 60 seconds without a usable PDF.") from error
+    if result.returncode != 0 or not destination.is_file() or destination.stat().st_size < 1000:
+        detail = (result.stderr or result.stdout).strip()[-1000:]
+        raise AssessmentError(f"Chromium PDF rendering failed ({result.returncode}): {detail}")
+    return destination
 
 
 def normalize_report(value: dict[str, Any], rubric: dict[str, Any]) -> dict[str, Any]:
@@ -969,6 +1429,12 @@ def doctor_report(repo: Path | None, rubric: dict[str, Any]) -> dict[str, Any]:
     add("python", "pass", f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
     git_path = shutil.which("git")
     add("git", "pass" if git_path else "fail", git_path or "git is not installed")
+    pdf_browser = find_chromium()
+    add(
+        "pdf browser",
+        "pass" if pdf_browser else "info",
+        str(pdf_browser) if pdf_browser else "Chrome/Chromium not found; HTML reports remain available",
+    )
     metadata_path = SKILL_ROOT / VENDOR_METADATA
     if metadata_path.exists():
         try:
@@ -1071,7 +1537,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     init_parser = subparsers.add_parser("init", help="Create an unscored assessment skeleton.")
     init_parser.add_argument("--repo", type=Path, required=True)
-    init_parser.add_argument("--app", action="append", type=parse_application, default=[])
+    init_parser.add_argument(
+        "--app",
+        action="append",
+        type=parse_application,
+        default=[],
+        metavar="ID=PATH",
+        help="Discovered application identifier and repository-relative path; repeat for each app.",
+    )
     init_parser.add_argument("--output", type=Path, required=True)
 
     validate_parser = subparsers.add_parser("validate", help="Validate a completed assessment.")
@@ -1080,11 +1553,16 @@ def build_parser() -> argparse.ArgumentParser:
     score_parser = subparsers.add_parser("score", help="Validate, score, and render a report.")
     score_parser.add_argument("--assessment", type=Path, required=True)
     score_parser.add_argument("--output-dir", type=Path, required=True)
+    score_parser.add_argument("--previous", type=Path, help="Previous assessment or report JSON for an embedded progress section.")
+    score_parser.add_argument("--pdf", action="store_true", help="Also print the HTML report to PDF with Chrome/Chromium.")
+    score_parser.add_argument("--browser", type=Path, help="Explicit Chrome/Chromium executable for --pdf.")
 
     compare_parser = subparsers.add_parser("compare", help="Compare two assessments or report JSON files.")
     compare_parser.add_argument("--before", type=Path, required=True)
     compare_parser.add_argument("--after", type=Path, required=True)
     compare_parser.add_argument("--output-dir", type=Path, required=True)
+    compare_parser.add_argument("--pdf", action="store_true", help="Also print the HTML comparison to PDF.")
+    compare_parser.add_argument("--browser", type=Path, help="Explicit Chrome/Chromium executable for --pdf.")
 
     doctor_parser = subparsers.add_parser("doctor", help="Check package health and repository readiness inputs.")
     doctor_parser.add_argument("--repo", type=Path)
@@ -1125,10 +1603,18 @@ def main() -> int:
             markdown_path = output_dir / "agent-readiness-report.md"
             json_path = output_dir / "agent-readiness-report.json"
             html_path = output_dir / "agent-readiness-report.html"
-            markdown_path.write_text(render_markdown(assessment, rubric, scores), encoding="utf-8")
             payload = report_payload(assessment, rubric, scores)
+            progress = None
+            if arguments.previous:
+                previous = normalize_report(read_json(arguments.previous), rubric)
+                progress = comparison_payload(previous, payload)
+                payload["progress"] = progress
+            markdown_path.write_text(render_markdown(assessment, rubric, scores, progress), encoding="utf-8")
             write_json(json_path, payload)
             html_path.write_text(render_html(payload), encoding="utf-8")
+            pdf_path = output_dir / "agent-readiness-report.pdf"
+            if arguments.pdf:
+                render_pdf(html_path, pdf_path, arguments.browser)
             print(
                 f"Owned: Level {payload['summary']['owned_level']} "
                 f"({payload['summary']['owned_percentage']:.2f}%). "
@@ -1138,6 +1624,8 @@ def main() -> int:
             print(f"Markdown: {markdown_path}")
             print(f"JSON: {json_path}")
             print(f"HTML: {html_path}")
+            if arguments.pdf:
+                print(f"PDF: {pdf_path}")
         elif arguments.command == "compare":
             before = normalize_report(read_json(arguments.before), rubric)
             after = normalize_report(read_json(arguments.after), rubric)
@@ -1150,6 +1638,9 @@ def main() -> int:
             markdown_path.write_text(render_comparison_markdown(comparison), encoding="utf-8")
             write_json(json_path, comparison)
             html_path.write_text(render_comparison_html(comparison), encoding="utf-8")
+            pdf_path = output_dir / "agent-readiness-comparison.pdf"
+            if arguments.pdf:
+                render_pdf(html_path, pdf_path, arguments.browser)
             print(
                 f"Owned delta: {signed(comparison['summary']['owned_percentage_delta'])} points. "
                 f"Regressions: {comparison['summary']['regression_count']}."
@@ -1157,6 +1648,8 @@ def main() -> int:
             print(f"Markdown: {markdown_path}")
             print(f"JSON: {json_path}")
             print(f"HTML: {html_path}")
+            if arguments.pdf:
+                print(f"PDF: {pdf_path}")
         elif arguments.command == "doctor":
             report = doctor_report(arguments.repo, rubric)
             if arguments.as_json:

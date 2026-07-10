@@ -1,6 +1,6 @@
 ---
 name: agent-readiness-scoring
-description: Audit, score, compare, and iteratively improve how safely and effectively coding agents can work in a software repository. Use for agent-readiness reports, readiness levels or percentages, Factory-compatible comparisons, evidence-backed repository audits, AGENT_READINESS_PREFERENCES.md setup, selecting readiness remediations, or autonomous one-criterion-at-a-time improvement loops.
+description: Audit, score, compare, report, and iteratively improve how safely and effectively coding agents can work in a software repository. Use for read-only agent-readiness audits, first-class HTML/PDF readiness reports, readiness levels or percentages, Factory-compatible comparisons, AGENT_READINESS_PREFERENCES.md setup, selecting remediations, or autonomous one-criterion-at-a-time improvement loops.
 ---
 
 # Agent Readiness Scoring
@@ -10,19 +10,21 @@ rubric. Prefer real engineering capability over score theater and make every jud
 
 ## Choose the operation
 
-- **Audit:** inspect and score without changing the repository.
+- **Audit-report:** inspect and score without changing the repository, then generate HTML, PDF when
+  local Chromium is available, Markdown, and JSON artifacts.
 - **Initialize preferences:** copy `assets/DEFAULT_AGENT_READINESS_PREFERENCES.md` to
   `AGENT_READINESS_PREFERENCES.md` in the repository root only when the user requests it or approves
   repository changes. Never overwrite an existing file.
-- **Remediate one:** score, select one failing criterion, implement a durable repo-specific fix,
+- **Remediate-one:** score, select one failing criterion, implement a durable repo-specific fix,
   validate it, rescore it, and commit only that fix when authorized.
-- **Improve to target:** repeat one criterion and one commit at a time until the requested owned
+- **Improve-to-target:** repeat one criterion and one commit at a time until the requested owned
   percentage or level is reached, or a genuine blocker requires user authority.
 - **Compare:** compare two assessments or reports and make regressions visible even when the total
   score rises.
 
-For an audit, read `references/rubric.json` completely. For remediation or a target loop, also read
-`references/remediation-loop.md`. Apply preferences in this order: explicit instructions in the
+For audit-report or compare, read `references/rubric.json` and `references/report-workflow.md`
+completely. For remediate-one or improve-to-target, also read `references/remediation-loop.md`.
+Apply preferences in this order: explicit instructions in the
 current request, root `AGENT_READINESS_PREFERENCES.md`, then
 `assets/DEFAULT_AGENT_READINESS_PREFERENCES.md`. State which file was used. Preferences guide how to
 implement a capability; they are not standing permission to create or connect third-party accounts,
@@ -44,9 +46,10 @@ accept costs, install external apps, add secrets, or mutate production.
 7. Create an assessment matching `references/assessment-format.md`.
    Record command and external-state checks in `provenance.evidence_checks`; store concise summaries,
    timestamps, and exit status rather than secrets or raw output.
-8. Validate and render it with:
+8. Add repository-aware recommendations following `references/report-workflow.md`, then validate and
+   render it with:
 
-   `python3 <skill-dir>/scripts/readiness.py score --assessment <assessment.json> --output-dir <dir>`
+   `python3 <skill-dir>/scripts/readiness.py score --assessment <assessment.json> --output-dir <dir> --pdf`
 
 9. Report both scores:
    - **Owned score:** excludes inapplicable applications from each criterion denominator.
@@ -79,6 +82,7 @@ not leak expected scores. The primary agent must still validate the resulting as
 - `readiness.py init`: create an unscored 82-criterion assessment skeleton.
 - `readiness.py validate`: validate IDs, scopes, statuses, evidence, and application coverage.
 - `readiness.py score`: validate and generate HTML, Markdown, and JSON readiness reports.
+  Add `--pdf` for a Chromium-derived PDF and `--previous` to embed progress from the prior round.
 - `readiness.py compare`: compare two assessments or report JSON files and generate Markdown, JSON,
   and HTML deltas with regressions first.
 - `readiness.py doctor`: verify package integrity, tools, Git state, preference discovery, and

@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Readiness Scoring"
-  short_description: "Audit and improve repository agent readiness"
-  default_prompt: "Use $agent-readiness-scoring to audit this repository, produce an evidence-backed report, and recommend the highest-value next criterion."
+  short_description: "Audit, report, and improve agent readiness"
+  default_prompt: "Use $agent-readiness-scoring in audit-report mode to audit this repository without modifying it and generate evidence-backed HTML and PDF readiness reports."
