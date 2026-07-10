@@ -17,7 +17,11 @@ preferences, reports, and remediation loop fully inspectable and customizable.
 - Produces a Factory-compatible score beside it for comparison.
 - Discovers and honors repository-specific `AGENT_READINESS_PREFERENCES.md` guidance.
 - Supports one-criterion-at-a-time autonomous remediation with explicit safety gates.
-- Generates Markdown and JSON reports through a dependency-free Python CLI.
+- Generates self-contained HTML, Markdown, and JSON reports through a dependency-free Python CLI.
+- Compares scoring rounds with regressions, evidence changes, confidence changes, and applicability
+  changes called out explicitly.
+- Records portable package fingerprints and audit provenance so results and vendored copies can be
+  verified later.
 - Supports custom 82-criterion rubric variants for other stacks and domains.
 
 The project deliberately values real engineering capability over keyword coverage. Documentation can
@@ -48,6 +52,7 @@ Both views come from the same evidence-backed assessment.
 
 ```text
 agent-readiness-scoring/
+├── VERSION
 ├── SKILL.md
 ├── agents/openai.yaml
 ├── assets/DEFAULT_AGENT_READINESS_PREFERENCES.md
@@ -55,13 +60,18 @@ agent-readiness-scoring/
 │   ├── assessment-format.md
 │   ├── remediation-loop.md
 │   └── rubric.json
+├── evals/scenarios.json
 └── scripts/
     ├── readiness.py
-    └── test_readiness.py
+    ├── agent_eval.py
+    ├── test_readiness.py
+    └── test_agent_eval.py
 ```
 
 `SKILL.md` contains the agent workflow. The rubric and remediation details are loaded only when
-needed. `readiness.py` owns deterministic validation, scoring, and report generation.
+needed. `readiness.py` owns deterministic validation, scoring, comparison, report generation, and
+package lifecycle checks. The separate `agent_eval.py` is maintainer-facing behavioral test tooling;
+it is not part of ordinary repository scoring.
 
 ## Quick Start
 
@@ -89,13 +99,27 @@ Generate the report:
 python3 scripts/readiness.py score --assessment /tmp/assessment.json --output-dir /tmp/readiness-report
 ```
 
+Compare two assessment or report JSON files:
+
+```bash
+python3 scripts/readiness.py compare --before /tmp/before.json --after /tmp/after.json --output-dir /tmp/readiness-comparison
+```
+
+Check package health and preference discovery for a repository:
+
+```bash
+python3 scripts/readiness.py doctor --repo /absolute/path/to/repo
+```
+
 Initialize repository-specific preferences without overwriting an existing file:
 
 ```bash
 python3 scripts/readiness.py preferences --output /absolute/path/to/repo/AGENT_READINESS_PREFERENCES.md
 ```
 
-The CLI requires Python 3 and Git. It has no third-party Python dependencies.
+The CLI requires Python 3 and Git. It has no third-party Python dependencies. Both `score` and
+`compare` produce a self-contained, print-ready HTML page in addition to machine-readable JSON and
+reviewable Markdown.
 
 ## Using The Skill With An Agent
 
@@ -139,18 +163,17 @@ authority.
 
 ## Why Ship A CLI?
 
-Scripts help when the work is deterministic and repeated. The CLI currently handles assessment
-initialization, validation, scoring, report rendering, rubric listing, and preference initialization.
+Scripts help when the work is deterministic and repeated. The CLI handles assessment initialization,
+validation, scoring, report rendering, comparison, package diagnostics, safe vendoring, rubric
+listing, and preference initialization.
 
 Repository interpretation remains agent work: discovering applications, deciding applicability,
 evaluating evidence, and choosing a durable remediation all depend on context. Encoding those as
 keyword scanners or one brittle detector per criterion would make the score easier to game and less
 portable across languages.
 
-The intended direction is one stable CLI with focused subcommands—not dozens of loosely related
-scripts. Good future candidates include report comparison, package diagnostics, provenance checks,
-and safe vendoring drift detection. Model-driven forward evaluation belongs in separate maintainer
-tooling.
+The design stays intentionally split: one stable user-facing CLI for deterministic mechanics, and a
+separate maintainer-facing behavioral evaluator for model-driven forward tests.
 
 ## Testing
 
@@ -158,6 +181,7 @@ Run the complete deterministic suite:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_readiness.py --verbose
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_agent_eval.py --verbose
 ```
 
 The suite covers rubric integrity, score math, applicability, level boundaries, malformed inputs,
@@ -165,9 +189,12 @@ preference copying, report output, and end-to-end CLI behavior against temporary
 repositories. GitHub Actions runs the same suite and executable CLI smoke tests on every push and
 pull request.
 
-Deterministic tests are only the first layer. Skill behavior should also be forward-tested against
-isolated synthetic repositories to verify read-only integrity, evidence quality, preference handling,
-approval gates, and resistance to score-gaming.
+The native Droid audit transcript was converted into behavioral invariants rather than copied into
+fixtures. Prepare an isolated scenario with `python3 scripts/agent_eval.py prepare --scenario
+read-only-evidence-audit --output /tmp/readiness-eval`, give the generated prompt to a fresh agent,
+then grade its run artifact with `agent_eval.py grade`. The evaluator verifies read-only integrity,
+application discovery, evidence-backed negatives, preference handling, approval gates, safe CI
+autonomy, and resistance to score-gaming.
 
 ## Vendoring
 
@@ -183,13 +210,26 @@ their normal skill-discovery mechanism. Keep repository-specific preferences at 
 do not edit the bundled default into a hidden project policy.
 
 Repository-only infrastructure such as this canonical repository's root `.github/` workflow and
-`.gitignore` is not part of the vendored skill package.
+`.gitignore`, deterministic tests, and behavioral eval harness are not part of the vendored skill
+package.
+
+Preview an exact sync without changing anything:
+
+```bash
+python3 scripts/readiness.py vendor --target /absolute/path/to/repo/.agents/skills/agent-readiness-scoring
+```
+
+After reviewing the file-level plan, add `--apply`. The command writes only the explicit
+distributable files, records their checksums in `.agent-readiness-package.json`, validates the result,
+and retains unrelated or formerly managed files rather than deleting them.
 
 ## Current Status
 
 - Transparent rubric: 82 criteria, version 1.0
-- Deterministic suite: 21 tests
-- Reports: Markdown and JSON
+- Package version: 0.2.0 with portable SHA-256 fingerprinting
+- Deterministic suite: 27 scoring/package tests plus 4 behavioral-harness tests
+- Reports: self-contained HTML, Markdown, and JSON
+- Comparisons: regression-first HTML, Markdown, and JSON
 - Default branch: `master`
 - Repository visibility: private
 
