@@ -1,0 +1,66 @@
+name: Propose agent-skills sync
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-agent-readiness-scoring
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.AGENT_SKILLS_SYNC_TOKEN }}
+      SKILL_NAME: agent-readiness-scoring
+    steps:
+      - name: Require cross-repository token
+        run: test -n "$GH_TOKEN"
+
+      - name: Check out canonical source
+        uses: actions/checkout@v4
+        with:
+          path: canonical
+          fetch-depth: 0
+
+      - name: Check out agent-skills
+        uses: actions/checkout@v4
+        with:
+          repository: zacharygcook/agent-skills
+          token: ${{ secrets.AGENT_SKILLS_SYNC_TOKEN }}
+          path: collection
+          fetch-depth: 0
+
+      - name: Export canonical package
+        run: python3 collection/scripts/sync_flagship_skills.py update --skill "$SKILL_NAME" --source-root canonical --apply
+
+      - name: Validate generated collection state
+        working-directory: collection
+        run: |
+          python3 scripts/build_inventory.py
+          python3 scripts/validate_skills.py
+          python3 scripts/sync_flagship_skills.py check --skill "$SKILL_NAME"
+
+      - name: Open synchronization pull request
+        working-directory: collection
+        run: |
+          if git diff --quiet -- skills/"$SKILL_NAME" flagship-skills.lock.json inventory/skills.json; then
+            echo "Collection is already current."
+            exit 0
+          fi
+          short_sha="${GITHUB_SHA::12}"
+          branch="automation/sync-${SKILL_NAME}-${short_sha}"
+          git config user.name "flagship-skill-sync"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add skills/"$SKILL_NAME" flagship-skills.lock.json inventory/skills.json
+          git commit -m "Sync ${SKILL_NAME} from canonical ${short_sha}"
+          git push origin "$branch"
+          gh pr create --repo zacharygcook/agent-skills --base master --head "$branch" --title "Sync ${SKILL_NAME} ${short_sha}" --body "Automated deterministic export from the canonical \`${SKILL_NAME}\` repository at \`${GITHUB_SHA}\`. Collection CI verifies the locked byte-for-byte package."
+
