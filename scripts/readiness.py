@@ -55,6 +55,19 @@ CATEGORY_TITLES = {
     "security": "Security",
     "project_management": "Project Management",
 }
+OWNED_EXTENSION_DEFINITIONS = {
+    "build_deploy_performance_hygiene": {
+        "version": "1.0",
+        "title": "Build & deploy performance hygiene",
+        "controls": {
+            "phase_timing": "Measured build and deploy phase timing",
+            "service_triggers": "Service-specific trigger boundaries",
+            "artifact_boundaries": "Runtime artifact boundaries",
+            "cache_limits": "Enforced cache limits",
+            "regression_budgets": "Regression budgets",
+        },
+    },
+}
 
 
 class AssessmentError(ValueError):
@@ -262,6 +275,7 @@ def create_skeleton(repo: Path, applications: list[tuple[str, str]], rubric: dic
             "evidence_checks": [],
         },
         "recommendations": [],
+        "owned_extensions": {},
         "criteria": criteria,
     }
 
@@ -397,6 +411,86 @@ def validate_recommendations(value: Any, criterion_ids: set[str]) -> list[str]:
     return errors
 
 
+def validate_owned_extensions(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, dict):
+        return ["owned_extensions must be an object when provided."]
+    errors: list[str] = []
+    unknown = sorted(set(value) - set(OWNED_EXTENSION_DEFINITIONS))
+    if unknown:
+        errors.append(f"Unknown owned extensions: {', '.join(unknown)}")
+    for extension_id, definition in OWNED_EXTENSION_DEFINITIONS.items():
+        entry = value.get(extension_id)
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            errors.append(f"owned_extensions.{extension_id} must be an object.")
+            continue
+        if entry.get("version") != definition["version"]:
+            errors.append(
+                f"owned_extensions.{extension_id}.version must be {definition['version']}."
+            )
+        controls = entry.get("controls")
+        if not isinstance(controls, dict):
+            errors.append(f"owned_extensions.{extension_id}.controls must be an object.")
+            continue
+        expected = set(definition["controls"])
+        missing = sorted(expected - set(controls))
+        extra = sorted(set(controls) - expected)
+        if missing:
+            errors.append(f"owned_extensions.{extension_id}: missing controls: {', '.join(missing)}")
+        if extra:
+            errors.append(f"owned_extensions.{extension_id}: unknown controls: {', '.join(extra)}")
+        for control_id in sorted(expected & set(controls)):
+            errors.extend(
+                validate_judgment(
+                    controls[control_id],
+                    criterion_id=f"{extension_id}.{control_id}",
+                    unit="repository",
+                    skippable=False,
+                )
+            )
+    return errors
+
+
+def owned_extension_summary(assessment: dict[str, Any]) -> dict[str, Any]:
+    entries = assessment.get("owned_extensions", {})
+    if not isinstance(entries, dict):
+        return {"checkpoints": [], "checkpoint_denominator": 0, "control_denominator": 0, "controls_passing": 0}
+    checkpoints: list[dict[str, Any]] = []
+    controls_passing = 0
+    control_denominator = 0
+    for extension_id, definition in OWNED_EXTENSION_DEFINITIONS.items():
+        entry = entries.get(extension_id)
+        if not isinstance(entry, dict):
+            continue
+        controls = entry.get("controls", {})
+        if not isinstance(controls, dict):
+            continue
+        control_rows = []
+        for control_id, title in definition["controls"].items():
+            judgment = controls.get(control_id, {})
+            status = judgment.get("status") if isinstance(judgment, dict) else "fail"
+            control_rows.append({"id": control_id, "title": title, "status": status, "assessment": judgment})
+            control_denominator += 1
+            controls_passing += int(status == "pass")
+        checkpoints.append({
+            "id": extension_id,
+            "title": definition["title"],
+            "version": definition["version"],
+            "status": "pass" if control_rows and all(row["status"] == "pass" for row in control_rows) else "fail",
+            "controls": control_rows,
+        })
+    return {
+        "checkpoints": checkpoints,
+        "checkpoint_denominator": len(checkpoints),
+        "checkpoints_passing": sum(checkpoint["status"] == "pass" for checkpoint in checkpoints),
+        "control_denominator": control_denominator,
+        "controls_passing": controls_passing,
+    }
+
+
 def validate_assessment(assessment: dict[str, Any], rubric: dict[str, Any]) -> None:
     errors: list[str] = []
     if assessment.get("schema_version") != "1.0":
@@ -421,6 +515,7 @@ def validate_assessment(assessment: dict[str, Any], rubric: dict[str, Any]) -> N
         entries = {}
     rubric_by_id = {criterion["id"]: criterion for criterion in rubric["criteria"]}
     errors.extend(validate_recommendations(assessment.get("recommendations"), set(rubric_by_id)))
+    errors.extend(validate_owned_extensions(assessment.get("owned_extensions")))
     missing = sorted(set(rubric_by_id) - set(entries))
     extra = sorted(set(entries) - set(rubric_by_id))
     if missing:
@@ -579,9 +674,27 @@ def render_markdown(
         "compatibility view reproduces the legacy behavior where a mixed inapplicable application",
         "reduces an app-scoped criterion score.",
         "",
-        "## Applications",
-        "",
     ]
+    extension_summary = owned_extension_summary(assessment)
+    if extension_summary["checkpoint_denominator"]:
+        lines.extend([
+            "## Owned Extensions",
+            "",
+            "These checkpoint controls are reported separately and do not change the stable 82-criterion owned or compatibility scores.",
+            "",
+        ])
+        for checkpoint in extension_summary["checkpoints"]:
+            controls = checkpoint["controls"]
+            passing = sum(control["status"] == "pass" for control in controls)
+            lines.append(
+                f"- **{checkpoint['title']}** (`{checkpoint['id']}` v{checkpoint['version']}) — "
+                f"{checkpoint['status']}; {passing}/{len(controls)} controls passing."
+            )
+        lines.extend([
+            f"- Checkpoint denominator: {extension_summary['checkpoint_denominator']}; control denominator: {extension_summary['control_denominator']}.",
+            "",
+        ])
+    lines.extend(["## Applications", ""])
     for app_id, application in assessment["repository"]["applications"].items():
         lines.append(f"- `{app_id}` (`{application['path']}`): {application['description']}")
 
@@ -816,6 +929,7 @@ def report_payload(
     }
     actions, recommendations_ranked = next_actions(assessment, definitions, scores)
     provenance = assessment.get("provenance", {})
+    extensions = owned_extension_summary(assessment)
     return {
         "schema_version": "1.0",
         "report_version": "2.0",
@@ -836,6 +950,7 @@ def report_payload(
             "status_counts": status_counts,
         },
         "applications": application_breakdown(assessment, rubric),
+        "owned_extensions": extensions,
         "next_actions": actions,
         "recommendations_ranked": recommendations_ranked,
         "criteria": {
@@ -1108,6 +1223,32 @@ def render_progress(payload: dict[str, Any]) -> str:
     )
 
 
+def render_owned_extensions(payload: dict[str, Any]) -> str:
+    summary = payload.get("owned_extensions", {})
+    checkpoints = summary.get("checkpoints", []) if isinstance(summary, dict) else []
+    if not checkpoints:
+        return '<article class="empty-state">No owned extensions were assessed in this round.</article>'
+    cards: list[str] = []
+    for checkpoint in checkpoints:
+        controls = checkpoint.get("controls", [])
+        control_rows = "".join(
+            f'<li><span class="matrix-status {escape(control.get("status", "fail"))}">{escape(status_text(control.get("status", "fail")))}</span> '
+            f'<strong>{escape(control.get("title", control.get("id", "control")))}</strong></li>'
+            for control in controls
+        )
+        cards.append(
+            f'<article class="judgment"><div class="judgment-heading"><strong>{escape(checkpoint.get("title", "Owned extension"))}</strong>'
+            f'<span class="matrix-status {escape(checkpoint.get("status", "fail"))}">{escape(status_text(checkpoint.get("status", "fail")))}</span></div>'
+            f'<p><code>{escape(checkpoint.get("id", "extension"))}</code> v{escape(checkpoint.get("version", "unknown"))}; '
+            f'{len([control for control in controls if control.get("status") == "pass"])}/{len(controls)} controls passing.</p><ul>{control_rows}</ul></article>'
+        )
+    return (
+        '<p class="notice">Owned extensions are outside the stable 82-criterion owned and compatibility scores. '
+        f'Checkpoint denominator: {summary.get("checkpoint_denominator", 0)}; control denominator: {summary.get("control_denominator", 0)}.</p>'
+        + "".join(cards)
+    )
+
+
 def render_html(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     repository = payload["repository"]
@@ -1128,6 +1269,7 @@ def render_html(payload: dict[str, Any]) -> str:
     evidence = render_evidence(payload)
     provenance = render_provenance(payload)
     progress = render_progress(payload)
+    owned_extensions = render_owned_extensions(payload)
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light"><title>Agent Readiness - {escape(repository.get('name', 'repository'))}</title>
@@ -1141,6 +1283,7 @@ def render_html(payload: dict[str, Any]) -> str:
 <header class="hero" style="min-height:7.2in;break-after:avoid"><div><div class="eyebrow">Repository capability audit</div><h1>{escape(repository.get('name', 'Repository'))}</h1><p class="hero-copy">An evidence-backed measure of how safely and effectively coding agents can understand, change, verify, and operate this repository.</p></div><div class="score-lockup"><strong>{summary['owned_percentage']:.1f}%</strong><span>Owned readiness</span><em>Level {summary['owned_level']}</em></div></header>
 <section class="meta-ribbon" style="break-after:page"><div><span>Compatibility</span><strong>{summary['compatibility_percentage']:.1f}% / Level {summary['compatibility_level']}</strong></div><div><span>Applications</span><strong>{app_count}</strong></div><div><span>Commit</span><strong>{escape(commit[:12])}</strong></div><div><span>Audit state</span><strong>{'Dirty working tree' if repository.get('dirty') else 'Clean commit'}</strong></div><div><span>Generated</span><strong>{escape(generated)}</strong></div></section>
 {warning_block}<section id="health" class="report-section major"><div class="section-intro"><div><div class="section-label">01 / Category health</div><h2>Where agents can move confidently.</h2></div><div class="stats"><div class="stat"><strong>{counts.get('pass', 0)}</strong><span>Passing</span></div><div class="stat"><strong>{counts.get('partial', 0)}</strong><span>Partial</span></div><div class="stat"><strong>{counts.get('fail', 0)}</strong><span>Failing</span></div><div class="stat"><strong>{counts.get('skipped', 0)}</strong><span>Not applicable</span></div></div></div>{category_chart}</section>
+<section id="owned-extensions" class="report-section"><div class="section-intro"><div><div class="section-label">01a / Owned extensions</div><h2>Additional standards, separately counted.</h2></div><p>Extensions provide repository-owned checkpoints without altering the stable 82-criterion compatibility score.</p></div>{owned_extensions}</section>
 <section id="progress" class="report-section major"><div class="section-intro"><div><div class="section-label">02 / Progress</div><h2>What changed since the last round.</h2></div><p>Score movement is secondary to durable capability gains. Regressions remain prominent even when the total score rises.</p></div>{progress}</section>
 <section id="actions" class="report-section major"><div class="section-intro"><div><div class="section-label">03 / Priority queue</div><h2>The next capabilities worth earning.</h2></div><p>Ranked work should reflect repository value, dependency order, implementation effort, and the authority required to proceed - never score points alone.</p></div>{actions}</section>
 <section id="applications" class="report-section major"><div class="section-intro"><div><div class="section-label">04 / Application surface</div><h2>Readiness is rarely uniform.</h2></div><p>Application-scoped criteria expose where one deployable surface is safe for agents while another still carries operational risk.</p></div>{application_section}</section>

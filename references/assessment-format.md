@@ -68,6 +68,18 @@ Create UTF-8 JSON with this shape:
       "flags": ["paid_service", "large_refactor"]
     }
   ],
+  "owned_extensions": {
+    "build_deploy_performance_hygiene": {
+      "version": "1.0",
+      "controls": {
+        "phase_timing": {"status":"pass","rationale":"Build and deploy phases are recorded.","evidence":["scripts/build_performance_report.mjs — writes phase timing evidence"],"confidence":"high"},
+        "service_triggers": {"status":"pass","rationale":"Each service has explicit trigger boundaries.","evidence":[".github/workflows/deploy-worker.yml — scoped paths"],"confidence":"high"},
+        "artifact_boundaries": {"status":"pass","rationale":"Runtime images exclude development-only artifacts.","evidence":["Dockerfile — multi-stage runtime target"],"confidence":"high"},
+        "cache_limits": {"status":"pass","rationale":"Builder cache retention has an enforced cap.","evidence":["docker/buildkitd.toml — maxUsedSpace"],"confidence":"high"},
+        "regression_budgets": {"status":"pass","rationale":"Measured image sizes have warning and failure budgets.","evidence":["docs/deployment/build_performance_budgets.json — thresholds"],"confidence":"high"}
+      }
+    }
+  },
   "criteria": {
     "readme": {
       "status": "pass",
@@ -113,3 +125,12 @@ failures exist. Use unique positive priorities, known criterion IDs, a concise r
 rationale, `small`/`medium`/`large` effort, and `autonomous`/`approval_required`/`deferred` authority.
 Allowed flags are `paid_service`, `external_account`, `large_refactor`, and `production_change`.
 Recommendations guide the report; they do not grant implementation permission.
+
+## Owned extensions
+
+`owned_extensions` is optional and does not alter the stable 82-criterion owned or compatibility
+scores. It records additional, versioned repository standards with their own denominator. The
+currently supported `build_deploy_performance_hygiene` checkpoint has exactly five evidence-backed,
+non-skippable controls: `phase_timing`, `service_triggers`, `artifact_boundaries`, `cache_limits`,
+and `regression_budgets`. A checkpoint passes only when every listed control passes; prose alone is
+not a valid substitute for a control judgment and its evidence.

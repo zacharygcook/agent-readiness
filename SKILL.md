@@ -65,6 +65,8 @@ not leak expected scores. The primary agent must still validate the resulting as
 ## Scoring integrity
 
 - Keep the compatibility rubric stable; version intentional rubric changes.
+- Owned extensions are versioned, evidence-backed checkpoints outside the 82-criterion rubric.
+  Report their denominators separately and never blend them into compatibility scoring.
 - Weight every non-skipped criterion equally. For app-scoped criteria, the criterion score is the
   fraction of applicable apps passing, not a raw point total.
 - Level bands match the compatibility baseline: Level 1 `<20%`, Level 2 `20–<40%`, Level 3
@@ -79,7 +81,7 @@ not leak expected scores. The primary agent must still validate the resulting as
 
 ## Deterministic tools
 
-- `readiness.py init`: create an unscored 82-criterion assessment skeleton.
+- `readiness.py init`: create an unscored 82-criterion assessment skeleton with an empty owned-extension map.
 - `readiness.py validate`: validate IDs, scopes, statuses, evidence, and application coverage.
 - `readiness.py score`: validate and generate HTML, Markdown, and JSON readiness reports.
   Add `--pdf` for a Chromium-derived PDF and `--previous` to embed progress from the prior round.

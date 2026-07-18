@@ -34,6 +34,8 @@ for writing report artifacts to the user-approved output directory.
 - Show mechanical fallback actions as unclassified when the assessment lacks agent-ranked
   recommendations; never imply a deterministic ranking has repository judgment.
 - Include the complete evidence ledger and provenance in print output.
+- When an assessment includes an owned extension, report its checkpoint and control denominators
+  separately; never blend them into the stable 82-criterion owned or compatibility scores.
 
 PDF generation is optional infrastructure, not permission to install software. If no browser is
 available, deliver the HTML and other formats, explain the missing local dependency, and do not

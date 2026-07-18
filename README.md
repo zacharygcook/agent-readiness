@@ -248,11 +248,11 @@ and retains unrelated or formerly managed files rather than deleting them.
 ## Current Status
 
 - Transparent rubric: 82 criteria, version 1.0
-- Package version: 0.3.0 with portable SHA-256 fingerprinting
-- Deterministic suite: 32 scoring/package tests plus 4 behavioral-harness tests
+- Package version: 0.4.0 with portable SHA-256 fingerprinting
+- Deterministic suite: 35 scoring/package tests plus 4 behavioral-harness tests
 - Reports: editorial HTML and Chromium-derived PDF plus Markdown and JSON
-- Report contents: category bars, application matrix, authority-aware actions, progress, evidence,
-  and provenance
+- Report contents: category bars, application matrix, separately counted owned extensions,
+  authority-aware actions, progress, evidence, and provenance
 - Comparisons: regression-first HTML/PDF, Markdown, and JSON
 - Default branch: `master`
 - Repository visibility: private
