@@ -6,7 +6,9 @@ flowchart LR
     target -- "Not yet" --> gaps
     target -- "Yes" --> level5["LEVEL 5<br/><b>Agent-ready, with receipts</b>"]
 
-    classDef decision stroke:#0f766e,stroke-width:3px
-    classDef success fill:#0f766e,color:#ffffff,stroke:#0f766e,stroke-width:3px
+    classDef phase fill:#DCE8EC,stroke:#3D5B68,color:#18242B,stroke-width:1.5px
+    classDef decision fill:#E5EEE4,stroke:#0F766E,color:#18242B,stroke-width:3px
+    classDef success fill:#0F766E,color:#FFFFFF,stroke:#0F766E,stroke-width:3px
+    class audit,gaps,improve,verify phase
     class target decision
     class level5 success

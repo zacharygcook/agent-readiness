@@ -1,3 +1,15 @@
 {
-  "theme": "dark"
+  "theme": "dark",
+  "themeVariables": {
+    "lineColor": "#A7B6BB",
+    "edgeLabelBackground": "#1B2529",
+    "fontFamily": "system-ui"
+  },
+  "flowchart": {
+    "curve": "basis",
+    "nodeSpacing": 34,
+    "rankSpacing": 48,
+    "padding": 14,
+    "htmlLabels": true
+  }
 }
