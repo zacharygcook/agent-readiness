@@ -1,6 +1,8 @@
 # Agent Readiness
 
 [![CI](https://github.com/zacharygcook/agent-readiness/actions/workflows/ci.yml/badge.svg)](https://github.com/zacharygcook/agent-readiness/actions/workflows/ci.yml)
+[![Install with npx](https://img.shields.io/badge/install%20with-npx-334155?logo=npm&logoColor=white)](#install)
+[![License: MIT](https://img.shields.io/badge/License-MIT-111111.svg)](LICENSE)
 
 A vendor-neutral skill that audits how safely and effectively coding agents can work in a repository,
 then helps improve the gaps with evidence instead of score theater.
