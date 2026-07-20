@@ -5,16 +5,18 @@
 A vendor-neutral skill that audits how safely and effectively coding agents can work in a repository,
 then helps improve the gaps with evidence instead of score theater.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/readiness-loop-dark.svg">
-  <img alt="Readiness loop: audit a repository, gather evidence, score it, choose one authorized improvement, validate and rescore, then repeat until the target is met." src="assets/readiness-loop.svg">
-</picture>
-
 ## Install
 
 ```bash
 npx skills add zacharygcook/agent-readiness
 ```
+
+## The readiness loop
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readiness-loop-dark.svg">
+  <img alt="Readiness loop: audit and prove evidence, choose one gap, make an authorized improvement, validate and rescore, then repeat until Level 5." src="assets/readiness-loop.svg">
+</picture>
 
 ## Start here
 

@@ -4,4 +4,9 @@ flowchart LR
     improve --> verify["VERIFY<br/><b>Validate · rescore</b>"]
     verify --> target{"Target<br/>met?"}
     target -- "Not yet" --> gaps
-    target -- "Yes" --> ready["READY<br/><b>Safer agent work</b>"]
+    target -- "Yes" --> level5["LEVEL 5<br/><b>Agent-ready, with receipts</b>"]
+
+    classDef decision stroke:#0f766e,stroke-width:3px
+    classDef success fill:#0f766e,color:#ffffff,stroke:#0f766e,stroke-width:3px
+    class target decision
+    class level5 success
