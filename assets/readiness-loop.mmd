@@ -1,6 +1,7 @@
-flowchart TB
-    audit["Audit this repo"] --> evidence["Gather evidence"] --> score["Score readiness"]
-    score --> report["Report gaps and next actions"]
-    report --> improve["Make one authorized improvement"]
-    improve --> verify["Validate and rescore"]
-    verify --> repeat["Repeat one criterion at a time until the target is met"]
+flowchart LR
+    audit["AUDIT &amp; PROVE<br/><b>Evidence</b>"] --> gaps["CHOOSE<br/><b>One gap</b>"]
+    gaps --> improve["IMPROVE<br/><b>Authorized change</b>"]
+    improve --> verify["VERIFY<br/><b>Validate · rescore</b>"]
+    verify --> target{"Target<br/>met?"}
+    target -- "Not yet" --> gaps
+    target -- "Yes" --> ready["READY<br/><b>Safer agent work</b>"]
