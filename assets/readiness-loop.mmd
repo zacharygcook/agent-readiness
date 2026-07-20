@@ -1,0 +1,6 @@
+flowchart TB
+    audit["Audit this repo"] --> evidence["Gather evidence"] --> score["Score readiness"]
+    score --> report["Report gaps and next actions"]
+    report --> improve["Make one authorized improvement"]
+    improve --> verify["Validate and rescore"]
+    verify --> repeat["Repeat one criterion at a time until the target is met"]
