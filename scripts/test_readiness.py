@@ -135,7 +135,7 @@ class ReadinessScoringTest(unittest.TestCase):
         self.assertIn("description:", skill.split("---", 2)[1])
         self.assertTrue(readiness.DEFAULT_RUBRIC.is_file())
         self.assertTrue(readiness.PREFERENCES_TEMPLATE.is_file())
-        self.assertEqual(readiness.package_version(), "0.6.1")
+        self.assertEqual(readiness.package_version(), "0.6.2")
         self.assertEqual(len(readiness.package_fingerprint()), 64)
         self.assertEqual(
             readiness.PREFERENCES_TEMPLATE.name,
@@ -388,7 +388,7 @@ class ReadinessScoringTest(unittest.TestCase):
             self.assertEqual(set(assessment["repository"]["applications"]), {"backend", "frontend"})
             self.assertFalse(assessment["repository"]["dirty"])
             self.assertEqual(assessment["preferences"]["checksum"], readiness.sha256_file(repository / "AGENT_READINESS_PREFERENCES.md"))
-            self.assertEqual(assessment["provenance"]["skill_version"], "0.6.1")
+            self.assertEqual(assessment["provenance"]["skill_version"], "0.6.2")
             self.assertEqual(assessment["provenance"]["applications"], ["backend", "frontend"])
             self.assertEqual(assessment["provenance"]["evidence_checks"], [])
             self.assertEqual(assessment["recommendations"], [])
