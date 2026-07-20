@@ -1,6 +1,6 @@
-# Agent Readiness Scoring
+# Agent Readiness
 
-[![CI](https://github.com/zacharygcook/agent-readiness-scoring/actions/workflows/ci.yml/badge.svg)](https://github.com/zacharygcook/agent-readiness-scoring/actions/workflows/ci.yml)
+[![CI](https://github.com/zacharygcook/agent-readiness/actions/workflows/ci.yml/badge.svg)](https://github.com/zacharygcook/agent-readiness/actions/workflows/ci.yml)
 
 A vendor-neutral skill that audits how safely and effectively coding agents can work in a repository,
 then helps improve the gaps with evidence instead of score theater.
@@ -13,13 +13,13 @@ then helps improve the gaps with evidence instead of score theater.
 ## Install
 
 ```bash
-npx skills add zacharygcook/agent-readiness-scoring
+npx skills add zacharygcook/agent-readiness
 ```
 
 ## Start here
 
 ```text
-$agent-readiness-scoring audit this repo and suggest improvements
+$agent-readiness audit this repo and suggest improvements
 ```
 
 The audit inspects the repository, scores each applicable criterion, and produces evidence-backed
@@ -27,14 +27,14 @@ HTML, Markdown, and JSON reports (plus a PDF when Chrome or Chromium is availabl
 modify the repository.
 
 ```text
-$agent-readiness-scoring walk me through setting up my preferences
+$agent-readiness walk me through setting up my preferences
 ```
 
 This explains the repository's readiness preferences and creates `AGENT_READINESS_PREFERENCES.md`
 only when you request or approve that change.
 
 ```text
-$agent-readiness-scoring improve this repo to Level 4, one criterion at a time
+$agent-readiness improve this repo to Level 4, one criterion at a time
 ```
 
 The skill selects one meaningful gap, implements and validates a durable fix, then rescores before

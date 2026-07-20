@@ -1,9 +1,9 @@
 ---
-name: agent-readiness-scoring
+name: agent-readiness
 description: Audit, score, compare, report, and iteratively improve how safely and effectively coding agents can work in a software repository. Use for read-only agent-readiness audits, first-class HTML/PDF readiness reports, readiness levels or percentages, Factory-compatible comparisons, AGENT_READINESS_PREFERENCES.md setup, selecting remediations, or autonomous one-criterion-at-a-time improvement loops.
 ---
 
-# Agent Readiness Scoring
+# Agent Readiness
 
 Produce a personally owned, vendor-neutral readiness assessment from a transparent 82-criterion
 rubric. Prefer real engineering capability over score theater and make every judgment auditable.
@@ -59,7 +59,7 @@ accept costs, install external apps, add secrets, or mutate production.
     HTML, Markdown, and JSON reports.
 
 If subagents are available and the task benefits from independence, give a fresh auditor only the
-repository path and: `Use $agent-readiness-scoring at <skill-dir> to perform a read-only audit.` Do
+repository path and: `Use $agent-readiness at <skill-dir> to perform a read-only audit.` Do
 not leak expected scores. The primary agent must still validate the resulting assessment.
 
 ## Scoring integrity

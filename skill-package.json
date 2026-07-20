@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "name": "agent-readiness-scoring",
+  "name": "agent-readiness",
   "version_file": "VERSION",
   "mappings": [
     {"source": "SKILL.md", "target": "SKILL.md"},

@@ -131,7 +131,7 @@ class ReadinessScoringTest(unittest.TestCase):
 
     def test_skill_package_has_required_metadata_and_resources(self) -> None:
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertTrue(skill.startswith("---\nname: agent-readiness-scoring\n"))
+        self.assertTrue(skill.startswith("---\nname: agent-readiness\n"))
         self.assertIn("description:", skill.split("---", 2)[1])
         self.assertTrue(readiness.DEFAULT_RUBRIC.is_file())
         self.assertTrue(readiness.PREFERENCES_TEMPLATE.is_file())
@@ -649,7 +649,7 @@ class ReadinessScoringTest(unittest.TestCase):
 
     def test_vendor_is_dry_run_by_default_and_apply_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / ".agents" / "skills" / "agent-readiness-scoring"
+            target = Path(directory) / ".agents" / "skills" / "agent-readiness"
             dry_run = run_cli("vendor", "--target", str(target), "--json")
             self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
             self.assertFalse(target.exists())

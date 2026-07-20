@@ -1290,7 +1290,7 @@ def render_html(payload: dict[str, Any]) -> str:
 <section id="failures" class="report-section major"><div class="section-intro"><div><div class="section-label">05 / Capability gaps</div><h2>Every failure, without camouflage.</h2></div><p>Partial results remain visible. Inapplicable applications are excluded from the owned denominator but preserved for auditability.</p></div>{failures}</section>
 <section id="evidence" class="report-section major"><div class="section-intro"><div><div class="section-label">06 / Evidence ledger</div><h2>Why each judgment exists.</h2></div><p>Paths, commands, rationale, confidence, and applicability are the durable record. Expand any criterion to inspect its evidence.</p></div>{evidence}</section>
 <section id="provenance" class="report-section major"><div class="section-intro"><div><div class="section-label">07 / Provenance</div><h2>Trust the report's lineage.</h2></div><p>Version, preferences, repository state, and freshness checks make this assessment reproducible and honest about external evidence.</p></div>{provenance}</section>
-<footer class="document-footer"><span>agent-readiness-scoring {escape(payload.get('provenance', {}).get('skill_version', 'legacy'))}</span><span>Owned score excludes genuinely inapplicable application surfaces.</span></footer></main>
+<footer class="document-footer"><span>agent-readiness {escape(payload.get('provenance', {}).get('skill_version', 'legacy'))}</span><span>Owned score excludes genuinely inapplicable application surfaces.</span></footer></main>
 <script>const details=[...document.querySelectorAll('details')];document.getElementById('collapse-all').addEventListener('click',()=>details.forEach(item=>item.open=false));document.getElementById('expand-all').addEventListener('click',()=>details.forEach(item=>item.open=true));const category=document.getElementById('matrix-category');const search=document.getElementById('matrix-search');function filterMatrix(){{const term=(search.value||'').toLowerCase();document.querySelectorAll('.matrix tbody tr').forEach(row=>{{row.hidden=Boolean(category.value&&row.dataset.category!==category.value)||Boolean(term&&!row.dataset.search.includes(term));}})}}category.addEventListener('change',filterMatrix);search.addEventListener('input',filterMatrix);window.addEventListener('beforeprint',()=>details.forEach(item=>item.open=true));</script></body></html>"""
 
 
@@ -1660,7 +1660,7 @@ def apply_vendor_plan(plan: dict[str, Any]) -> None:
         shutil.copymode(source, destination)
     metadata = {
         "schema_version": "1.0",
-        "package": "agent-readiness-scoring",
+        "package": "agent-readiness",
         "version": plan["version"],
         "fingerprint": plan["fingerprint"],
         "files": package_file_checksums(),
