@@ -3,13 +3,22 @@ name: Propose agent-skills sync
 on:
   push:
     branches: [master]
+    paths:
+      - SKILL.md
+      - VERSION
+      - skill-package.json
+      - agents/**
+      - assets/**
+      - evals/**
+      - references/**
+      - scripts/**
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: sync-agent-readiness-scoring
+  group: sync-agent-readiness
   cancel-in-progress: true
 
 jobs:
@@ -18,7 +27,7 @@ jobs:
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.AGENT_SKILLS_SYNC_TOKEN }}
-      SKILL_NAME: agent-readiness-scoring
+      SKILL_NAME: agent-readiness
     steps:
       - name: Require cross-repository token
         run: test -n "$GH_TOKEN"
@@ -37,10 +46,20 @@ jobs:
           path: collection
           fetch-depth: 0
 
+      - name: Detect distributable package changes
+        id: package
+        run: |
+          preview="$(python3 collection/scripts/sync_flagship_skills.py update --skill "$SKILL_NAME" --source-root canonical --json)"
+          printf '%s\n' "$preview"
+          changed="$(printf '%s' "$preview" | python3 -c 'import json, sys; print(str(json.load(sys.stdin)["changed"]).lower())')"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
       - name: Export canonical package
+        if: steps.package.outputs.changed == 'true'
         run: python3 collection/scripts/sync_flagship_skills.py update --skill "$SKILL_NAME" --source-root canonical --apply
 
       - name: Validate generated collection state
+        if: steps.package.outputs.changed == 'true'
         working-directory: collection
         run: |
           python3 scripts/build_inventory.py
@@ -48,19 +67,18 @@ jobs:
           python3 scripts/sync_flagship_skills.py check --skill "$SKILL_NAME"
 
       - name: Open synchronization pull request
+        if: steps.package.outputs.changed == 'true'
         working-directory: collection
         run: |
-          if git diff --quiet -- skills/"$SKILL_NAME" flagship-skills.lock.json inventory/skills.json; then
-            echo "Collection is already current."
-            exit 0
-          fi
           short_sha="${GITHUB_SHA::12}"
-          branch="automation/sync-${SKILL_NAME}-${short_sha}"
+          branch="automation/sync-${SKILL_NAME}"
           git config user.name "flagship-skill-sync"
           git config user.email "actions@users.noreply.github.com"
-          git checkout -b "$branch"
+          git fetch origin "$branch" || true
+          git checkout -B "$branch"
           git add skills/"$SKILL_NAME" flagship-skills.lock.json inventory/skills.json
           git commit -m "Sync ${SKILL_NAME} from canonical ${short_sha}"
-          git push origin "$branch"
-          gh pr create --repo zacharygcook/agent-skills --base master --head "$branch" --title "Sync ${SKILL_NAME} ${short_sha}" --body "Automated deterministic export from the canonical \`${SKILL_NAME}\` repository at \`${GITHUB_SHA}\`. Collection CI verifies the locked byte-for-byte package."
-
+          git push --force-with-lease --set-upstream origin "$branch"
+          if ! gh pr list --repo zacharygcook/agent-skills --head "$branch" --state open --json number --jq 'length > 0' | grep -qx true; then
+            gh pr create --repo zacharygcook/agent-skills --base master --head "$branch" --title "Sync ${SKILL_NAME} ${short_sha}" --body "Automated deterministic export from the canonical \`${SKILL_NAME}\` repository at \`${GITHUB_SHA}\`. Collection CI verifies the locked byte-for-byte package."
+          fi
